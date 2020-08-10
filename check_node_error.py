@@ -383,7 +383,7 @@ class Node():
     def __init__(self, parent=None, number=None, lonlat=None):
         self.parent = parent
         self.number = number
-        self.x, self.y = LatLonToTWD97().convert(lonlat[1], lonlat[0])
+        self.x, self.y = LatLonToTWD97().convert(radians(lonlat[1]), radians(lonlat[0]))
         self.g = 0
         self.h = 0
         self.f = 0

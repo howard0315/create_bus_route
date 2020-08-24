@@ -5,7 +5,7 @@ import hmac
 import os
 import pickle
 import shutil
-from datetime import datetime
+from datetime import datetime, timedelta
 from hashlib import sha1
 from pprint import pprint
 from time import mktime
@@ -43,26 +43,28 @@ class BusGroup():
     city_name: 縣市名稱，公路客運則為''\n
     load_local_data: 是否要載入本地儲存的公車資料
     """
-    def __init__(self, project_zone, group_type, city_name='', load_local_data=False):
+    def __init__(self, project_zone, group_type, city_name='', load_local_data=False, my_auth=None):
+        self.peak_bound = {
+            'morning_peak': [datetime(1900, 1, 1, 7,0), datetime(1900, 1, 1, 9, 0)],
+            'evening_peak': [datetime(1900, 1, 1, 17,0), datetime(1900, 1, 1, 19, 0)]
+        }
+
         self.project_zone = project_zone
         self.group_type = group_type
         self.city_name = city_name
-        #設定網址中的區域名稱: City/{City} or Intercity
-        if self.city_name == '':
-            self.group_url = self.group_type
-        else:
-            self.group_url = self.group_type + '/' + self.city_name
         self.load_local_data = load_local_data
-        print('\nInitialize ' + self.group_url)
+        
+        self.set_group_url()
+        print('\nInitialize {}'.format(self.group_url))
         #建立儲存PTX資料的路徑
-        os.makedirs('saved_request/' + self.group_url, exist_ok=True)
+        os.makedirs(os.path.join('saved_request', self.group_url), exist_ok=True)
         #讀取公車路線資料
-        self.Route = self.get_PTX_data('Route')
+        self.Route = self.get_PTX_data('Route', my_auth)
         #讀取公車站牌資料
         #站牌(stop): 站牌桿實際位置; 站位(station): 同一個站名聚合在一個點位
-        self.Stop = self.get_PTX_data('Stop')
+        self.Stop = self.get_PTX_data('Stop', my_auth)
         #讀取公車路線站序資料
-        self.StopOfRoute = self.get_PTX_data('StopOfRoute')
+        self.StopOfRoute = self.get_PTX_data('StopOfRoute', my_auth)
         self.modify_StopOfRoute()
         #讀取公車路線班表資料
         if city_name != 'Taichung':
@@ -75,11 +77,19 @@ class BusGroup():
         if os.path.exists(self.group_url):
             shutil.rmtree(self.group_url)
     
-    def get_PTX_data(self, data_name):
+    def set_group_url(self):
+        """設定網址中的區域名稱: City/{City} or Intercity"""
+        if self.city_name == '':
+            self.group_url = self.group_type
+        else:
+            self.group_url =  '{}/{}'.format(self.group_type, self.city_name)
+
+    def get_PTX_data(self, data_name, my_auth):
         """讀取PTX資料"""
         print('\tStart importing {}'.format(data_name))
-        local_pickle_name = 'saved_request/' + self.group_url + \
-            '/' + data_name + '.pickle'
+        local_pickle_name = os.path.join(
+            'saved_request', self.group_url, '{}.pickle'.format(data_name)
+        )
         #如果要載入本地資料，而且本地資料也存在的話，就把本地資料載入而不是去PTX抓
         if os.path.isfile(local_pickle_name) and self.load_local_data:
             with open(local_pickle_name, 'rb') as local_file:
@@ -89,7 +99,7 @@ class BusGroup():
                 'get', 'https://ptx.transportdata.tw/MOTC/v2/Bus/{}/{}?$format=JSON'.format(
                     data_name, self.group_url
                 ), 
-                headers= a.get_auth_header()
+                headers= my_auth.get_auth_header()
             )
             if raw_PTX.status_code == 200:
                 PTX_data = pandas.read_json(raw_PTX.content)
@@ -137,11 +147,16 @@ class BusGroup():
         """整合不同營運單位的公路客運"""
         checked_route_ID = {}
         for i in self.StopOfRoute.index:
-            UID_dir = '{}_{}'.format(self.StopOfRoute.SubRouteUID[i], self.StopOfRoute.Direction[i])
+            UID_dir = '{}_{}'.format(
+                self.StopOfRoute.SubRouteUID[i], 
+                self.StopOfRoute.Direction[i]
+            )
             if UID_dir not in checked_route_ID:
                 checked_route_ID[UID_dir] = i
             else:
-                self.StopOfRoute.Operators[checked_route_ID[UID_dir]].append(self.StopOfRoute.Operators[i][0])
+                self.StopOfRoute.Operators[checked_route_ID[UID_dir]].append(
+                    self.StopOfRoute.Operators[i][0]
+                )
                 self.drop_route.append(i)
 
     def check_if_route_pass_zone(self):
@@ -180,19 +195,50 @@ class BusGroup():
         
         return False
 
-    def check_bus_time(self, BusStopTime):
+    def check_bus_peak(self, BusStopTime):
         """檢查公車是晨峰昏峰還是離峰"""
-        peak_bound = {
-            'morning_peak': [datetime(1900,1,1,7,0), datetime(1900,1,1,9,0)],
-            'evening_peak': [datetime(1900,1,1,17,0), datetime(1900,1,1,19,0)]
-        }
         bus_time = datetime.strptime(BusStopTime['DepartureTime'], '%H:%M')
-        if bus_time > peak_bound['morning_peak'][0] and bus_time < peak_bound['morning_peak'][1]:
+        if bus_time > self.peak_bound['morning_peak'][0] and bus_time < self.peak_bound['morning_peak'][1]:
             return 'morning_peak'
-        elif bus_time > peak_bound['evening_peak'][0] and bus_time < peak_bound['evening_peak'][1]:
+        elif bus_time > self.peak_bound['evening_peak'][0] and bus_time < self.peak_bound['evening_peak'][1]:
             return 'evening_peak'
         else:
             return 'off_peak'
+
+    def check_bus_timetable(self, Timetables):
+        """檢查班表式資料的班距"""
+        peak_count = {'morning_peak': 0, 'evening_peak': 0, 'off_peak': 0}
+        
+        first_bus = datetime(1900, 1, 1, 23, 59)
+        last_bus = datetime(1900, 1, 1, 0, 1)
+        for BusStopTime in Timetables:
+            if 'ServiceDay' in BusStopTime and self.check_service_day(BusStopTime['ServiceDay'], 'weekday'):
+                if datetime.strptime(BusStopTime['DepartureTime'], '%H:%M') < first_bus:
+                    first_bus = datetime.strptime(BusStopTime['DepartureTime'], '%H:%M')
+                if datetime.strptime(BusStopTime['DepartureTime'], '%H:%M') > last_bus:
+                    last_bus = datetime.strptime(BusStopTime['DepartureTime'], '%H:%M')
+            peak_count[self.check_bus_peak(BusStopTime)] += 1
+        
+        headway = {
+            'morning_peak': (self.peak_bound['morning_peak'][1] - self.peak_bound['morning_peak'][0]) /
+                timedelta(minutes=1) if peak_count['morning_peak'] == 0
+                else (self.peak_bound['morning_peak'][1] - self.peak_bound['morning_peak'][0]) / 
+                    peak_count['morning_peak'] * timedelta(hours=1), 
+            'evening_peak': (self.peak_bound['evening_peak'][1] - self.peak_bound['evening_peak'][0]) /
+                timedelta(minutes=1) if peak_count['evening_peak'] == 0
+                else (self.peak_bound['evening_peak'][1] - self.peak_bound['evening_peak'][0]) / 
+                    peak_count['evening_peak'] * timedelta(hours=1),
+            'off_peak': 720 if last_bus == first_bus 
+                else (last_bus - first_bus) / peak_count['off_peak'] * timedelta(hours=1),
+        }
+        return headway
+
+    def check_bus_frequency(self, Frequencys):
+        """檢查班距式資料的班距"""
+        hour_count = [0 for _ in range(48)]
+        for freq in Frequencys:
+            pass
+        pass
 
     def output_stop_info(self):
         """輸出公車站牌點位"""
@@ -342,11 +388,17 @@ def main():
 
     Bus = {}
     for city in project_zone:
-        Bus[city] = BusGroup(project_zone, 'City', City_map[city]['en'], load_local_data=True)
+        Bus[city] = BusGroup(
+            project_zone, 'City', City_map[city]['en'], 
+            load_local_data=True, my_auth=a
+        )
         Bus[city].output_stop_info()
         Bus[city].output_route_seq()
 
-    Bus['IC'] = BusGroup(project_zone, 'InterCity', load_local_data=True)
+    Bus['IC'] = BusGroup(
+        project_zone, 'InterCity', 
+        load_local_data=True, my_auth=a
+    )
     Bus['IC'].output_stop_info()
     Bus['IC'].output_route_seq()
 

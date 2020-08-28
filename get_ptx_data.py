@@ -44,9 +44,19 @@ class BusGroup():
     load_local_data: 是否要載入本地儲存的公車資料
     """
     def __init__(self, project_zone, group_type, city_name='', load_local_data=False, my_auth=None):
+        self.day_list = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+        self.peak_list = ['morning_peak', 'evening_peak']
+        self.other_time = ['offpeak', 'all_day']
         self.peak_bound = {
-            'morning_peak': [datetime(1900, 1, 1, 7,0), datetime(1900, 1, 1, 9, 0)],
-            'evening_peak': [datetime(1900, 1, 1, 17,0), datetime(1900, 1, 1, 19, 0)]
+            'morning_peak': [datetime(1900, 1, 1, 7, 0), datetime(1900, 1, 1, 9, 0)],
+            'evening_peak': [datetime(1900, 1, 1, 17, 0), datetime(1900, 1, 1, 19, 0)],
+            'offpeak': [datetime(1900, 1, 1, 23, 59), datetime(1900, 1, 1, 0, 1)],
+            'all_day': [datetime(1900, 1, 1, 23, 59), datetime(1900, 1, 1, 0, 1)],
+        }
+        self.day_group = {
+            'weekend': ['all', ['Saturday', 'Sunday']],
+            'weekday': ['peak', ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']],
+            'weekday_2': ['peak', ['Tuesday', 'Wednesday', 'Thursday']]
         }
 
         self.project_zone = project_zone
@@ -67,8 +77,8 @@ class BusGroup():
         self.StopOfRoute = self.get_PTX_data('StopOfRoute', my_auth)
         self.modify_StopOfRoute()
         #讀取公車路線班表資料
-        if city_name != 'Taichung':
-            self.Schedule = self.get_PTX_data('Schedule')
+        if self.city_name != 'Taichung':
+            self.Schedule = self.get_PTX_data('Schedule', my_auth)
             self.process_timetable()
         #統整不同業者的公路客運路線
         self.drop_route = []
@@ -115,15 +125,14 @@ class BusGroup():
     def modify_StopOfRoute(self):
         """修改StopOfRoute的DataFrame，以加上起終點文字"""
         Headsign = ['' for _ in self.StopOfRoute.index]
-        DestinationStopNameZh = ['' for _ in self.StopOfRoute.index]
         for i in self.StopOfRoute.index:
-            subroute_list = self.Route[self.Route['RouteUID'] == \
-                self.StopOfRoute.RouteUID[i]].SubRoutes.tolist()[0]
+            subroute_list = self.Route[self.Route['RouteUID'] == self.StopOfRoute.RouteUID[i]].SubRoutes.tolist()[0]
             for j in subroute_list:
                 if j['SubRouteUID'] == self.StopOfRoute.SubRouteUID[i]:
                     Headsign[i] = j['Headsign']
                     break
         self.StopOfRoute['Headsign'] = Headsign
+        self.StopOfRoute['Schedule'] = [{} for _ in self.StopOfRoute.index]
 
     def check_if_stop_in_zone(self):
         """
@@ -159,6 +168,14 @@ class BusGroup():
                 )
                 self.drop_route.append(i)
 
+    def combine_schedule(self, schedule_main, schedule_other):
+        for day in self.day_list:
+            for peak in self.peak_list + self.other_time:
+                schedule_main[day][peak]['n'] += schedule_other[day][peak]['n']
+                schedule_main[day][peak]['st'] = min(schedule_main[day][peak]['st'], schedule_other[day][peak]['st'])
+                schedule_main[day][peak]['ed'] = min(schedule_main[day][peak]['ed'], schedule_other[day][peak]['ed'])
+        return schedule_main
+
     def check_if_route_pass_zone(self):
         """
         檢查公路客運路線是否經過計畫區域：\n
@@ -182,18 +199,28 @@ class BusGroup():
             #市區公車就都記錄為都有在區域內
             self.StopOfRoute['if_pass_zone'] = 1
 
-    def check_service_day(self, day_type, service_day):
-        """檢查有沒有在平日或假日營運"""
-        day_dict = {
-            'weekend': ['Sunday', 'Saturday'],
-            'weekday': ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
-        }
+    def process_timetable(self):
+        if self.city_name != 'Taichung':
+            for r in self.Schedule.index:
+                bus_schedule = self.new_bus_schedule()
+                print(self.Schedule.SubRouteName[r]['Zh_tw'])
 
-        for day in day_dict[day_type]:
-            if service_day[day] == 1:
-                return True
-        
-        return False
+                if 'Timetables' in self.Schedule:
+                    bus_schedule = self.manage_bus_timetable(self.Schedule.Timetables[r], bus_schedule)
+                elif 'Frequencys' in self.Schedule:
+                    bus_schedule = self.manage_bus_frequency(self.Schedule.Frequencys[r], bus_schedule)
+
+    def new_bus_schedule(self):
+        bus_schedule = {}
+        for day in self.day_list:
+            bus_schedule[day] = {}
+            for peak in self.peak_list + self.other_time:
+                bus_schedule[day][peak] = {
+                    'n': 0, 
+                    'st': self.peak_bound[peak][0], 
+                    'ed': self.peak_bound[peak][1]
+                }
+        return bus_schedule
 
     def check_bus_peak(self, BusStopTime):
         """檢查公車是晨峰昏峰還是離峰"""
@@ -203,42 +230,84 @@ class BusGroup():
         elif bus_time > self.peak_bound['evening_peak'][0] and bus_time < self.peak_bound['evening_peak'][1]:
             return 'evening_peak'
         else:
-            return 'off_peak'
+            return 'offpeak'
 
-    def check_bus_timetable(self, Timetables):
+    def manage_bus_timetable(self, Timetables, bus_schedule):
         """檢查班表式資料的班距"""
-        peak_count = {'morning_peak': 0, 'evening_peak': 0, 'off_peak': 0}
-        
-        first_bus = datetime(1900, 1, 1, 23, 59)
-        last_bus = datetime(1900, 1, 1, 0, 1)
         for BusStopTime in Timetables:
-            if 'ServiceDay' in BusStopTime and self.check_service_day(BusStopTime['ServiceDay'], 'weekday'):
-                if datetime.strptime(BusStopTime['DepartureTime'], '%H:%M') < first_bus:
-                    first_bus = datetime.strptime(BusStopTime['DepartureTime'], '%H:%M')
-                if datetime.strptime(BusStopTime['DepartureTime'], '%H:%M') > last_bus:
-                    last_bus = datetime.strptime(BusStopTime['DepartureTime'], '%H:%M')
-            peak_count[self.check_bus_peak(BusStopTime)] += 1
+            if 'ServiceDay' in BusStopTime:
+                for StopTime in BusStopTime['StopTimes']:
+                    for day in self.day_list:
+                        if BusStopTime['ServiceDay'][day] != 0:
+                            bus_schedule[day][self.check_bus_peak(StopTime)]['n'] += 1
+                            bus_schedule[day]['all_day']['n'] += 1
+                            bus_schedule[day]['all_day']['st'] = min(
+                                bus_schedule[day]['all_day']['st'], 
+                                datetime.strptime(StopTime['DepartureTime'], '%H:%M')
+                            )
+                            bus_schedule[day]['all_day']['ed'] = max(
+                                bus_schedule[day]['all_day']['ed'], 
+                                datetime.strptime(StopTime['DepartureTime'], '%H:%M')
+                            )
+                            bus_schedule[day]['offpeak']['st'] = bus_schedule[day]['all_day']['st']
+                            bus_schedule[day]['offpeak']['ed'] = bus_schedule[day]['all_day']['ed']
         
-        headway = {
-            'morning_peak': (self.peak_bound['morning_peak'][1] - self.peak_bound['morning_peak'][0]) /
-                timedelta(minutes=1) if peak_count['morning_peak'] == 0
-                else (self.peak_bound['morning_peak'][1] - self.peak_bound['morning_peak'][0]) / 
-                    peak_count['morning_peak'] * timedelta(hours=1), 
-            'evening_peak': (self.peak_bound['evening_peak'][1] - self.peak_bound['evening_peak'][0]) /
-                timedelta(minutes=1) if peak_count['evening_peak'] == 0
-                else (self.peak_bound['evening_peak'][1] - self.peak_bound['evening_peak'][0]) / 
-                    peak_count['evening_peak'] * timedelta(hours=1),
-            'off_peak': 720 if last_bus == first_bus 
-                else (last_bus - first_bus) / peak_count['off_peak'] * timedelta(hours=1),
-        }
-        return headway
+        return bus_schedule
 
-    def check_bus_frequency(self, Frequencys):
+    def manage_bus_frequency(self, Frequencys, bus_schedule):
         """檢查班距式資料的班距"""
-        hour_count = [0 for _ in range(48)]
-        for freq in Frequencys:
-            pass
-        pass
+        for BusFrequency in Frequencys:
+            if 'ServiceDay' in BusFrequency:
+                headway = (BusFrequency['MinHeadwayMins'] + BusFrequency['MaxHeadwayMins']) / 2
+                start_time = datetime.strptime(BusFrequency['StartTime'], '%H:%M')
+                end_time = datetime.strptime(BusFrequency['EndTime'], '%H:%M')
+
+                duration = {}
+                for peak in self.peak_list:
+                    duration[peak] = max(0, 
+                        min(self.peak_bound[peak][1], end_time) - 
+                        max(self.peak_bound[peak][0], start_time))
+                duration['all_day'] = end_time - start_time
+                duration['offpeak'] = duration['all_day'] - sum(duration[peak] for peak in self.peak_list)
+
+                for day in self.day_list:
+                    if BusFrequency['ServiceDay'][day] != 0:
+                        for peak in self.peak_list + self.other_time:
+                            bus_schedule[day][peak]['n'] += (duration[peak] / timedelta(minutes=1)) / headway
+                        bus_schedule[day]['all_day']['st'] = min(bus_schedule[day]['all_day']['st'], start_time)
+                        bus_schedule[day]['all_day']['ed'] = max(bus_schedule[day]['all_day']['ed'], end_time)
+                        
+        for day in self.day_list:
+            bus_schedule[day]['offpeak']['st'] = bus_schedule[day]['all_day']['st']
+            bus_schedule[day]['offpeak']['ed'] = bus_schedule[day]['all_day']['ed']
+        
+        return bus_schedule
+
+    def get_headway(self, bus_schedule):
+        headway = {}
+        for group in self.day_group:
+            num_day = len(self.day_group[group][1])
+
+            headway[group] = {}
+            for peak in self.peak_list:
+                duration = (
+                    sum((bus_schedule[day][peak]['ed'] - bus_schedule[day][peak]['st']) / timedelta(minutes=1)
+                        for day in self.day_group[group][1])
+                )
+                headway[group][peak] = int(duration / 
+                    max(sum(bus_schedule[day][peak]['n'] for day in self.day_group[group][1]), num_day)
+                )
+            for time in self.other_time:
+                duration = (
+                    sum(max((bus_schedule[day][time]['ed'] - bus_schedule[day][time]['st']) / timedelta(minutes=1), 240)
+                        for day in self.day_group[group][1])
+                )
+                num_bus = sum(bus_schedule[day][time]['n'] for day in self.day_group[group][1])
+                if num_bus < 3 * num_day:
+                    headway[group][time] = 240
+                else:
+                    headway[group][time] = int(min(duration / num_bus, 240))
+        return headway
 
     def output_stop_info(self):
         """輸出公車站牌點位"""
@@ -332,6 +401,36 @@ class BusGroup():
                                 )
                             )
 
+    def output_schedule(self):
+        """輸出公車班表"""
+        print('Output schedule of ' + self.group_url)
+        #判別路線是否經過計畫區域
+        self.check_if_route_pass_zone()
+        #建立資料夾
+        os.makedirs(self.group_url, exist_ok=True)
+
+        #生成檔名：route_list.csv
+        headway_file = os.path.join(self.group_url, 'route_headway.csv')
+        #寫入路線清單
+        with open(headway_file, 'w', encoding='utf-8') as list_out:
+            #寫入停站列表
+            #各欄位為: 附屬路線唯一識別代碼,附屬路線名稱,車頭描述,營運業者,去返程,有無經過計畫區域
+            list_out.write(
+                'SubRouteUID,SubRouteName,Headsign,Direction,if_pass_zone,'
+                'weekend_AD,weekday_AM,weekday_PM,weekday_non,weekday2_AM,weekday2_PM,weekday2_non\n'
+            )
+            for i in self.StopOfRoute.index:
+                if i not in self.drop_route:
+                    list_out.write(
+                        '{SubRouteUID},{SubRouteName},{Headsign},{Direction},{if_pass_zone}\n'.format(
+                            SubRouteUID=self.StopOfRoute.SubRouteUID[i],
+                            SubRouteName=self.StopOfRoute.SubRouteName[i]['Zh_tw'],
+                            Headsign=self.StopOfRoute.Headsign[i].replace(' ', '').replace(',', '_'),
+                            Direction=self.StopOfRoute.Direction[i],
+                            if_pass_zone=self.StopOfRoute.if_pass_zone[i]
+                        )
+                    )
+
     def stop_info_str(self, s):
         return '{StopUID},{Lat},{Lon},{StopName},{LocationCityCode}\n'.format(
             StopUID=self.Stop.StopUID[s],
@@ -394,6 +493,8 @@ def main():
         )
         Bus[city].output_stop_info()
         Bus[city].output_route_seq()
+
+    raise IOError
 
     Bus['IC'] = BusGroup(
         project_zone, 'InterCity', 

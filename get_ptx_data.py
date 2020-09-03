@@ -441,8 +441,7 @@ class BusGroup():
         )
 
 def main():
-    app_id = '79a340b8c2e7499bbedaf110c172f6f3'
-    app_key = 'Rt8k1rc5QhLO7kyj6Aw_pfid6X4'
+
     a = Auth(app_id, app_key)
 
     #縣市名稱列舉

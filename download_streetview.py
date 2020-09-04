@@ -20,7 +20,7 @@ def download(parameter, OD):
 
 
 def main():
-    
+    howard5328821_KEY = input('Input API key: ')
     parameter = {
         'size': '427x240',
         'location': '{lat},{lon}'.format(lat=25.033001, lon=121.563360),

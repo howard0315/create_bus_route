@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import base64
+import copy
 import hmac
 import os
 import pickle
@@ -80,6 +81,7 @@ class BusGroup():
         if self.city_name != 'Taichung':
             self.Schedule = self.get_PTX_data('Schedule', my_auth)
             self.process_timetable()
+            self.output_headway()
         #統整不同業者的公路客運路線
         self.drop_route = []
         self.aggregate_bus_route()
@@ -132,7 +134,8 @@ class BusGroup():
                     Headsign[i] = j['Headsign']
                     break
         self.StopOfRoute['Headsign'] = Headsign
-        self.StopOfRoute['Schedule'] = [{} for _ in self.StopOfRoute.index]
+        self.StopOfRoute['Schedule'] = [[] for _ in self.StopOfRoute.index]
+        self.StopOfRoute['Headway'] = [[] for _ in self.StopOfRoute.index]
 
     def check_if_stop_in_zone(self):
         """
@@ -166,15 +169,25 @@ class BusGroup():
                 self.StopOfRoute.Operators[checked_route_ID[UID_dir]].append(
                     self.StopOfRoute.Operators[i][0]
                 )
+                
+                self.StopOfRoute.loc[checked_route_ID[UID_dir], 'Schedule'] = [self.combine_schedule(
+                    self.StopOfRoute.Schedule[checked_route_ID[UID_dir]], 
+                    self.StopOfRoute.Schedule[i]
+                )]
                 self.drop_route.append(i)
 
+    def output_headway(self):
+        for i in self.StopOfRoute.index:
+            self.StopOfRoute.loc[i, 'Headway'] = [self.get_headway(self.StopOfRoute.loc[i, 'Schedule'])]
+
     def combine_schedule(self, schedule_main, schedule_other):
+        new_schedule = self.new_bus_schedule()
         for day in self.day_list:
             for peak in self.peak_list + self.other_time:
-                schedule_main[day][peak]['n'] += schedule_other[day][peak]['n']
-                schedule_main[day][peak]['st'] = min(schedule_main[day][peak]['st'], schedule_other[day][peak]['st'])
-                schedule_main[day][peak]['ed'] = min(schedule_main[day][peak]['ed'], schedule_other[day][peak]['ed'])
-        return schedule_main
+                new_schedule[day][peak]['n'] = schedule_main[day][peak]['n'] + schedule_other[day][peak]['n']
+                new_schedule[day][peak]['st'] = min(schedule_main[day][peak]['st'], schedule_other[day][peak]['st'])
+                new_schedule[day][peak]['ed'] = max(schedule_main[day][peak]['ed'], schedule_other[day][peak]['ed'])
+        return new_schedule
 
     def check_if_route_pass_zone(self):
         """
@@ -202,13 +215,18 @@ class BusGroup():
     def process_timetable(self):
         if self.city_name != 'Taichung':
             for r in self.Schedule.index:
-                bus_schedule = self.new_bus_schedule()
-                print(self.Schedule.SubRouteName[r]['Zh_tw'])
+                bus_schedule = {}
 
                 if 'Timetables' in self.Schedule:
-                    bus_schedule = self.manage_bus_timetable(self.Schedule.Timetables[r], bus_schedule)
+                    bus_schedule = self.manage_bus_timetable(self.Schedule.Timetables[r])
                 elif 'Frequencys' in self.Schedule:
-                    bus_schedule = self.manage_bus_frequency(self.Schedule.Frequencys[r], bus_schedule)
+                    bus_schedule = self.manage_bus_frequency(self.Schedule.Frequencys[r])
+
+                self.StopOfRoute.loc[
+                    (self.StopOfRoute['SubRouteUID'] == self.Schedule.SubRouteUID[r]) & 
+                    (self.StopOfRoute['Direction'] == self.Schedule.Direction[r]),
+                    'Schedule'
+                ] = [copy.deepcopy(bus_schedule)]
 
     def new_bus_schedule(self):
         bus_schedule = {}
@@ -232,8 +250,9 @@ class BusGroup():
         else:
             return 'offpeak'
 
-    def manage_bus_timetable(self, Timetables, bus_schedule):
+    def manage_bus_timetable(self, Timetables):
         """檢查班表式資料的班距"""
+        bus_schedule = self.new_bus_schedule()
         for BusStopTime in Timetables:
             if 'ServiceDay' in BusStopTime:
                 for StopTime in BusStopTime['StopTimes']:
@@ -254,8 +273,9 @@ class BusGroup():
         
         return bus_schedule
 
-    def manage_bus_frequency(self, Frequencys, bus_schedule):
+    def manage_bus_frequency(self, Frequencys):
         """檢查班距式資料的班距"""
+        bus_schedule = self.new_bus_schedule()
         for BusFrequency in Frequencys:
             if 'ServiceDay' in BusFrequency:
                 headway = (BusFrequency['MinHeadwayMins'] + BusFrequency['MaxHeadwayMins']) / 2
@@ -307,6 +327,8 @@ class BusGroup():
                     headway[group][time] = 240
                 else:
                     headway[group][time] = int(min(duration / num_bus, 240))
+                if headway[group][time] < 0:
+                    headway[group][time] = -999
         return headway
 
     def output_stop_info(self):
@@ -403,33 +425,41 @@ class BusGroup():
 
     def output_schedule(self):
         """輸出公車班表"""
-        print('Output schedule of ' + self.group_url)
-        #判別路線是否經過計畫區域
-        self.check_if_route_pass_zone()
-        #建立資料夾
-        os.makedirs(self.group_url, exist_ok=True)
+        if self.city_name != 'Taichung':
+            print('Output schedule of ' + self.group_url)
+            #判別路線是否經過計畫區域
+            self.check_if_route_pass_zone()
+            #建立資料夾
+            os.makedirs(self.group_url, exist_ok=True)
 
-        #生成檔名：route_list.csv
-        headway_file = os.path.join(self.group_url, 'route_headway.csv')
-        #寫入路線清單
-        with open(headway_file, 'w', encoding='utf-8') as list_out:
-            #寫入停站列表
-            #各欄位為: 附屬路線唯一識別代碼,附屬路線名稱,車頭描述,營運業者,去返程,有無經過計畫區域
-            list_out.write(
-                'SubRouteUID,SubRouteName,Headsign,Direction,if_pass_zone,'
-                'weekend_AD,weekday_AM,weekday_PM,weekday_non,weekday2_AM,weekday2_PM,weekday2_non\n'
-            )
-            for i in self.StopOfRoute.index:
-                if i not in self.drop_route:
-                    list_out.write(
-                        '{SubRouteUID},{SubRouteName},{Headsign},{Direction},{if_pass_zone}\n'.format(
-                            SubRouteUID=self.StopOfRoute.SubRouteUID[i],
-                            SubRouteName=self.StopOfRoute.SubRouteName[i]['Zh_tw'],
-                            Headsign=self.StopOfRoute.Headsign[i].replace(' ', '').replace(',', '_'),
-                            Direction=self.StopOfRoute.Direction[i],
-                            if_pass_zone=self.StopOfRoute.if_pass_zone[i]
+            #生成檔名：route_list.csv
+            headway_file = os.path.join(self.group_url, 'route_headway.csv')
+            #寫入路線清單
+            with open(headway_file, 'w', encoding='utf-8') as list_out:
+                #寫入停站列表
+                #各欄位為: 附屬路線唯一識別代碼,附屬路線名稱,車頭描述,營運業者,去返程,有無經過計畫區域
+                list_out.write('SubRouteUID,SubRouteName,Headsign,Direction,if_pass_zone')
+                for group in self.day_group:
+                    for peak in self.peak_list + self.other_time:
+                        list_out.write(',{}_{}'.format(group, peak))
+                list_out.write('\n')
+                for i in self.StopOfRoute.index:
+                    if i not in self.drop_route:
+                        list_out.write(
+                            '{SubRouteUID},{SubRouteName},{Headsign},{Direction},{if_pass_zone}'.format(
+                                SubRouteUID=self.StopOfRoute.SubRouteUID[i],
+                                SubRouteName=self.StopOfRoute.SubRouteName[i]['Zh_tw'],
+                                Headsign=self.StopOfRoute.Headsign[i].replace(' ', '').replace(',', '_'),
+                                Direction=self.StopOfRoute.Direction[i],
+                                if_pass_zone=self.StopOfRoute.if_pass_zone[i]
+                            )
                         )
-                    )
+
+                        for group in self.day_group:
+                            for peak in self.peak_list + self.other_time:
+                                list_out.write(',{}'.format(self.StopOfRoute.loc[i, 'Headway'][group][peak]))
+
+                        list_out.write('\n')
 
     def stop_info_str(self, s):
         return '{StopUID},{Lat},{Lon},{StopName},{LocationCityCode}\n'.format(
@@ -441,7 +471,8 @@ class BusGroup():
         )
 
 def main():
-
+    app_id = input('Input app_id: ')
+    app_key = input('Input app_key: ')
     a = Auth(app_id, app_key)
 
     #縣市名稱列舉
@@ -492,6 +523,7 @@ def main():
         )
         Bus[city].output_stop_info()
         Bus[city].output_route_seq()
+        Bus[city].output_schedule()
 
     raise IOError
 
@@ -503,19 +535,27 @@ def main():
     Bus['IC'].output_route_seq()
 
     #輸出全區域車站清單
-    print('Output stop in central Taiwan')
+    print('Output stops in central Taiwan')
     #輸出站牌資料
     stop_file = 'central_taiwan_bus_stop.csv'
     with open(stop_file, 'w', encoding='utf-8') as stop_out:
         stop_out.write('StopUID,PositionLat,PositionLon,StopName,LocationCityCode\n')
-        for city in project_zone:
+        recorded_stop = []
+        for city in project_zone + ['IC']:
+            for s in Bus[city].Stop.index:
+                if Bus[city].Stop.if_pass_zone[s] == 1 and Bus[city].Stop.StopUID[s] not in recorded_stop:
+                    recorded_stop.append(Bus[city].Stop.StopUID[s])
+                    stop_out.write(Bus[city].stop_info_str(s))
+            
+    print('Output routes in central Taiwan')
+    #輸出路線資料
+    stop_file = 'central_taiwan_bus_stop.csv'
+    with open(stop_file, 'w', encoding='utf-8') as stop_out:
+        stop_out.write('StopUID,PositionLat,PositionLon,StopName,LocationCityCode\n')
+        for city in project_zone + ['IC']:
             for s in Bus[city].Stop.index:
                 if Bus[city].Stop.if_pass_zone[s] == 1:
                     stop_out.write(Bus[city].stop_info_str(s))
-        
-        for s in Bus['IC'].Stop.index:
-            if Bus['IC'].Stop.if_pass_zone[s] == 1:
-                stop_out.write(Bus['IC'].stop_info_str(s))
 
 if __name__ == '__main__':
     main()

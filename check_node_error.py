@@ -2,7 +2,8 @@
 
 from csv import reader as csv_reader
 from math import cos, radians, sin, sqrt, tan
-from os.path import isfile
+from os import listdir
+from os.path import isdir, isfile, join
 from re import compile as re_compile
 from re import match as re_match
 from re import sub as re_sub
@@ -61,24 +62,29 @@ def get_node_list(node_csv_path: str):
     return node_list
 
 def get_file_name():
-    file_name = input('請輸入公車路線資料檔名(包含副檔名, *.lin, *.txt, ...)：')
-    while not isfile(file_name):
-        file_name = input('無此檔案，請重新輸入：')
-    
-    file_option = input(
-        '這個要檢查的檔案長得如何呢？\n'
-        '1 = 內容像是要匯入cube的樣子 (eg. 有LINE NAME=之類的)\n'
-        '2 = 這個檔案裡面只有點號順序 (eg. 只有123,-456,...之類的)\n'
+    file_names = {}
+    folder_option = input(
+        '請問要檢查單一檔案還是資料夾內的全部檔案呢？\n'
+        '1 = 單一檔案\n'
+        '2 = 資料夾內的全部檔案\n'
         '請輸入1或2：')
-    while file_option != '1' and file_option != '2':
-        file_option = input(
-            '亂填!!!，重來\n'
-            '1 = 裡面像是要匯入cube的樣子 (eg. 有LINE NAME=之類的)\n'
-            '2 = 那個檔案裡面只有點號順序 (eg. 只有123,-456,...之類的)\n'
-            '這個要檢查的檔案長得如何呢？')
-    file_option = int(file_option)
 
-    return file_name, file_option
+    if folder_option == '1':
+        file_name = input('請輸入公車路線資料檔名(包含副檔名, *.lin, *.txt, ...)：')
+        while not isfile(file_name):
+            file_name = input('無此檔案，請重新輸入：')
+        file_names[file_name] = file_name
+    
+    elif folder_option == '2':
+        folder_name = input('請輸入資料夾路徑：')
+        while not isdir(folder_name):
+            folder_name = input('無此資料夾，請重新輸入：')
+
+        for f in listdir(folder_name):
+            if f.endswith(".lin") or f.endswith(".txt"):
+                file_names[f] = join(folder_name, f)
+
+    return file_names
 
 class CheckError(object):
     """檢查錯誤都會用到的東西"""
@@ -126,13 +132,16 @@ class CheckError(object):
         else:
             self.ER_file.write('{}\n'.format(result_line))
 
-    def progress_bar(self, current_num: int, total_num: int):
+    def progress_bar(self, file_name: str, current_num: int, total_num: int):
         """ Display the progress bar if the result is printed to the text file. """
         if self.output_option == 2:
             print(
-                '\r[{:<50}] checked routes: {}/{}'.format(
-                '=' * int(current_num / (2 * total_num) * 100), current_num, total_num), 
-                end='')
+                '\r[{:<50}] {}: {}/{}'.format(
+                    '=' * int(current_num / (2 * total_num) * 100), 
+                    file_name, current_num, total_num
+                ), 
+                    end=''
+            )
     
     def clean_up_progress_bar(self):
         """ If the progress bar is displayed, print an empty line when the progress reaches 100%. """
@@ -140,19 +149,30 @@ class CheckError(object):
             print()
 
 class CheckSyntaxError(CheckError):
-    """語法錯誤的相關東西"""
+    """格式錯誤的相關東西"""
 
     def __init__(self, error_type: dict):
-        print('\n首先檢查點號序之中的語法錯誤，像是多打逗點、打錯逗點之類的...')
-        super().__init__('檢查語法錯誤')
+        print('\n首先檢查點號序之中的格式錯誤，像是多打逗點、打錯逗點之類的...')
+        super().__init__('檢查格式錯誤')
         self.error_type = error_type
 
-    def check_syntax(self, route_data: str, file_option: int):
-        route_dict = self.process_route(route_data, file_option)
-        
+    def go_over_files(self, files_data: dict):
+        files_dict = {}
+        total_error = True
         self.open_file()
-        no_syntax_error = True
+        for f in files_data:
+            route_dict, no_syntax_error = self.check_syntax(f, files_data[f])
+            files_dict[f] = route_dict
+            total_error = total_error and no_syntax_error
+        self.close_file()
 
+        print('格式檢查完畢')
+
+        return files_dict, total_error
+
+    def check_syntax(self, file_name: str, route_data: str):
+        route_dict = self.process_route(route_data)
+        no_syntax_error = True
         route_num = 0
         total_route = len(route_dict.keys())
         for LINE_NAME in route_dict:
@@ -175,33 +195,28 @@ class CheckSyntaxError(CheckError):
 
                 if not new_no_syntax_error:
                     self.print_result(
-                        '({}/{}) LINE NAME=\"{}\"，有以下語法錯誤：\n'
-                        '{}'.format(route_num, total_route, LINE_NAME, '\n'.join(failed_caption))
+                        '{} ({}/{}) LINE NAME=\"{}\"，有以下格式錯誤：\n'
+                        '{}'.format(file_name, route_num, total_route, LINE_NAME, '\n'.join(failed_caption))
                     )
                     self.print_result('')
                 
                 no_syntax_error = no_syntax_error and new_no_syntax_error
 
-            self.progress_bar(route_num, total_route)
+            self.progress_bar(file_name, route_num, total_route)
     
         self.clean_up_progress_bar()
-        self.close_file()
-        
-        print('語法檢查完畢')
 
         return route_dict, no_syntax_error
     
-    def process_route(self, route_data: str, file_option: int):
-        """ process route_data based on file_option"""
+    def process_route(self, route_data: str):
+        """ process route_data based on file_option """
         route_dict = {}
 
         route_data = route_data.replace('\n', '')
-        if file_option == 1:
-            route_data = route_data.replace(';;<<PT>><<LINE>>;;', '')
-            route_data = re_sub(r';+臺中公車;+', '', route_data)
-            route_data = re_sub(r';+台中公車;+', '', route_data)
+        route_data = re_sub(r';+[^;]+;+', '', route_data)
+        if 'LINE NAME' in route_data:
             route_data = route_data.split('LINE NAME=\"')
-            route_data = [rd for rd in route_data if len(rd) > 0]
+            route_data = [rd for rd in route_data if len(rd) > 0 if 'N=' in rd]
             for rd in route_data:
                 LINE_NAME = rd[:rd.index('\"')]
                 node_seq = rd[rd.index('N=')+2:]
@@ -235,7 +250,14 @@ class CheckNodeError(CheckError):
         self.node_list = node_list
         self.checked_result = {}
 
-    def line_sanity_check(self, route_dict: dict):
+    def go_over_files(self, files_dict: dict):
+        self.open_file()
+        for f in files_dict:
+            self.line_sanity_check(f, files_dict[f])
+        self.close_file()
+        print('點號檢查完畢')
+
+    def line_sanity_check(self, file_name: str, route_dict: dict):
         """檢查是不是有非區域內道路混進來了"""
         self.open_file()
 
@@ -328,17 +350,14 @@ class CheckNodeError(CheckError):
                         failed_caption.append(' {}  (其他錯誤)'.format(', '.join(map(str, failed_path))))
 
                 self.print_result(
-                    '({}/{}) LINE NAME=\"{}\"，下列區間不在路網內：\n' 
-                    '{}\n\n'.format(num_checked_line, total_line, line_name, '\n'.join(failed_caption))
+                    '{} ({}/{}) LINE NAME=\"{}\"，下列區間不在路網內：\n' 
+                    '{}\n\n'.format(file_name, num_checked_line, total_line, line_name, '\n'.join(failed_caption))
                 )
 
             # progress bar
-            self.progress_bar(num_checked_line, total_line)
+            self.progress_bar(file_name, num_checked_line, total_line)
 
         self.clean_up_progress_bar()
-        self.close_file()
-
-        print('點號檢查完畢')
     
     def check_section(self, st: int, ed: int, failed_path: list, section_type: str, failed_caption: list):
         found = False
@@ -551,19 +570,21 @@ def main():
         node_list = get_node_list(node_csv_path)
         road_list = get_road_list(road_csv_path)
 
-        file_name, file_option = get_file_name()
-        with open(file_name, 'r', encoding = "Big5") as routes:
-            route_data = routes.read()
+        file_paths = get_file_name()
+        files_data = {}
+        for file_name in file_paths:
+            with open(file_paths[file_name], 'r', encoding = "Big5") as routes:
+                files_data[file_name] = routes.read()
 
         SyntaxCheck = CheckSyntaxError(error_type)
-        route_dict, no_syntax_eror = SyntaxCheck.check_syntax(route_data, file_option)
+        files_dict, no_syntax_error = SyntaxCheck.go_over_files(files_data)
 
-        if no_syntax_eror:
+        if no_syntax_error:
             NodeCheck = CheckNodeError(road_list, node_list)
-            NodeCheck.line_sanity_check(route_dict)
+            NodeCheck.go_over_files(files_dict)
             input('檢查完畢')
         else:
-            input('公車路線資料檔內有語法錯誤，結束程式')
+            input('公車路線資料檔內有格式錯誤，結束程式')
 
 if __name__ == '__main__':
     main()

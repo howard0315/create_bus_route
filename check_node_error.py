@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 
-from csv import reader as csv_reader
+import os
+import os.path
+import re
+import csv
 from math import cos, radians, sin, sqrt, tan
-from os import listdir
-from os.path import isdir, isfile, join
-from re import compile as re_compile
-from re import match as re_match
-from re import sub as re_sub
+from pathlib import Path
+
 
 def check_csv_file(file_name: str, file_type: str, pass_all: bool):
-    while not isfile(file_name) and not pass_all:
+    while not os.path.isfile(file_name) and not pass_all:
         while True:
             new_input = input(
                 '{}不存在(檔名：{})\n'
@@ -34,30 +34,43 @@ def check_csv_file(file_name: str, file_type: str, pass_all: bool):
 def get_road_list(road_csv_path: str):
     road_list = {}
     with open(road_csv_path, newline='') as road_csv:
-        road_row = csv_reader(road_csv)
+        road_row = csv.reader(road_csv)
+        
+        first = True
         for r in road_row:
-            if r[0] == 'ID':
-                continue
+            if first:
+                LENGTH = r.index('LENGTH')
+                A = r.index('A')
+                B = r.index('B')
+                DIR1 = r.index('DIR1')
+                first = False
             else:
-                if int(r[4]) == 0:
-                    road_list[(int(r[2]), int(r[3]))] = float(r[1])
-                    road_list[(int(r[3]), int(r[2]))] = float(r[1])
-                elif int(r[4]) == 1:
-                    road_list[(int(r[2]), int(r[3]))] = float(r[1])
+                if int(r[DIR1]) == 0:
+                    road_list[(int(r[A]), int(r[B]))] = float(r[LENGTH])
+                    road_list[(int(r[B]), int(r[A]))] = float(r[LENGTH])
+                elif int(r[DIR1]) == 1:
+                    road_list[(int(r[A]), int(r[B]))] = float(r[LENGTH])
                 else:
-                    road_list[(int(r[3]), int(r[2]))] = float(r[1])
+                    road_list[(int(r[B]), int(r[A]))] = float(r[LENGTH])
+    
     print('完成道路讀取...')
     return road_list
 
 def get_node_list(node_csv_path: str):
     node_list = {}
     with open(node_csv_path, newline='') as node_csv:
-        road_row = csv_reader(node_csv)
-        for r in road_row:
-            if r[0] == 'N':
-                continue
+        node_row = csv.reader(node_csv)
+        
+        first = True
+        for n in node_row:
+            if first:
+                N = n.index('N')
+                X = n.index('X')
+                Y = n.index('Y')
+                first = False
             else:
-                node_list[int(r[0])] = (float(r[1]), float(r[2]))
+                node_list[int(n[N])] = (float(n[X]), float(n[Y]))
+        
     print('完成節點讀取...')
     return node_list
 
@@ -71,59 +84,134 @@ def get_file_name():
 
     if folder_option == '1':
         file_name = input('請輸入公車路線資料檔名(包含副檔名, *.lin, *.txt, ...)：')
-        while not isfile(file_name):
+        while not os.path.isfile(file_name):
             file_name = input('無此檔案，請重新輸入：')
         file_names[file_name] = file_name
     
     elif folder_option == '2':
         folder_name = input('請輸入資料夾路徑：')
-        while not isdir(folder_name):
+        while not os.path.isdir(folder_name):
             folder_name = input('無此資料夾，請重新輸入：')
 
-        for f in listdir(folder_name):
+        for f in os.listdir(folder_name):
             if f.endswith(".lin") or f.endswith(".txt"):
-                file_names[f] = join(folder_name, f)
+                file_names[f] = os.path.join(folder_name, f)
 
     return file_names
+
+def progress_bar(bar_name: str, current_num: int, total_num: int, output_option: int = 2):
+    """ Display the progress bar if the result is printed to the text file. """
+    if output_option == 2:
+        print(
+            '\r[{:<50}] {}: {}/{}'.format(
+                '=' * int(current_num / (2 * total_num) * 100), 
+                bar_name, current_num, total_num
+            ), 
+                end=''
+        )
+        if current_num == total_num:
+            print()
 
 class CheckError(object):
     """檢查錯誤都會用到的東西"""
 
     def __init__(self, check_type: str):
-        self.get_option(check_type)
+        self.check_type = check_type
+        self.get_debug_option()
+        self.get_output_option()
+        self.get_remove_option()
 
-    def get_option(self, check_type: str):
+    def get_debug_option(self):
+        debug_str = input('\n發現{}時，要提示錯誤型態或可能解法嗎？[Y/N]: '.format(self.check_type))
+        while debug_str.upper() != 'Y' and debug_str.upper() != 'N':
+            debug_str = input('[Y/N]: ')
+        if debug_str.upper() == 'Y':
+            debug_option = True
+        else:
+            debug_option = False
+
+        self.debug_option = debug_option
+
+    def get_output_option(self):
         output_option = input(
-            '要如何顯示{}的結果呢？\n'
+            '\n要如何顯示檢查{}的結果呢？\n'
             '1 = 直接顯示在這邊\n'
             '2 = 輸出到一個文字檔\n'
-            '請輸入1或2：'.format(check_type))
+            '請輸入1或2：'.format(self.check_type))
         while output_option != '1' and output_option != '2':
-            output_option = input(
-                '亂填!!!，重來\n'
-                '1 = 直接顯示在這邊\n'
-                '2 = 輸出到一個文字檔\n'
-                '要如何顯示結果呢？')
+            output_option = input('請輸入1或2：')
         output_option = int(output_option)
 
         if output_option == 2:
-            result_filename = input('請輸入{}結果輸出檔名(要包含.txt)：'.format(check_type))
-            while re_match(r'.*\.txt', result_filename) is None:
-                result_filename = input('格式不符，請重新輸入{}結果輸出檔名(要包含.txt)：'.format(check_type))
+            result_filename = input(
+                '請輸入{}結果輸出檔名(要包含.txt)：'.format(self.check_type)
+            )
+            while re.match(r'.*\.txt', result_filename) is None:
+                result_filename = input(
+                    '格式不符，請重新輸入{}結果輸出檔名(要包含.txt)：'.format(self.check_type)
+                )
         else:
-            result_filename = ''
-        
+            result_filename = None
+
         self.output_option = output_option
         self.result_filename = result_filename
 
-    def open_file(self):
+    def get_remove_option(self):
+        remove_option = input(
+            '\n要如何處理有{}的檔案呢？\n'
+            '1 = 不處理\n'
+            '2 = 刪除\n'
+            '3 = 移動到其他地方\n'
+            '請輸入1、2或3：'.format(self.check_type))
+        while remove_option != '1' and remove_option != '2' and remove_option != '3':
+            remove_option = input('請輸入1、2或3：')
+        remove_option = int(remove_option)
+
+        if remove_option == 3:
+            trashcan_dir = input('請輸入{}檔案移動的目標路徑：'.format(self.check_type))
+        else:
+            trashcan_dir = None
+        
+        self.remove_option = remove_option
+        self.trashcan_dir = trashcan_dir
+
+    def remove_failed_path(self, file_name: str):
+        if self.remove_option == 2:
+            os.remove(file_name)
+            print('\n已刪除 {}\n'.format(file_name.replace('\\', '/')))
+        elif self.remove_option == 3:
+            target_filename = os.path.join(self.trashcan_dir, os.path.split(file_name)[-1])
+            if os.path.isfile(target_filename):
+                os.remove(target_filename)
+            Path(file_name).rename(target_filename)
+            print('\n已移動檔案\n舊路徑: {}\n新路徑: {}\n'.format(
+                    file_name.replace('\\', '/'), target_filename.replace('\\', '/')
+                )
+            )
+
+    def open_logfile(self):
         """ Open the text file for printing result if necessary."""
         if self.output_option == 2:
             self.ER_file = open(self.result_filename, 'w')
 
-    def close_file(self):
+    def close_logfile(self):
         if self.output_option == 2:
             self.ER_file.close()
+
+    def print_failed_info(self, file_name, num_checked_line, total_line, line_name, failed_caption):
+        if line_name != 'current_line':
+            line_name_text = '\n({}/{}) LINE NAME=\"{}\"'.format(
+                num_checked_line, total_line, line_name
+            )
+        else:
+            line_name_text = ''
+        
+        if len(failed_caption) > 0:
+            failed_info = '下列區間不在路網內：\n{}'.format('\n'.join(failed_caption))
+        else:
+            failed_info = '本路線有{}'.format(self.check_type)
+        
+        self.print_result('{}{}\n{}\n'.format(file_name, line_name_text, failed_info))
 
     def print_result(self, result_line: str):
         """ Print the result based on the output option previously input."""
@@ -132,39 +220,25 @@ class CheckError(object):
         else:
             self.ER_file.write('{}\n'.format(result_line))
 
-    def progress_bar(self, file_name: str, current_num: int, total_num: int):
-        """ Display the progress bar if the result is printed to the text file. """
-        if self.output_option == 2:
-            print(
-                '\r[{:<50}] {}: {}/{}'.format(
-                    '=' * int(current_num / (2 * total_num) * 100), 
-                    file_name, current_num, total_num
-                ), 
-                    end=''
-            )
-    
-    def clean_up_progress_bar(self):
-        """ If the progress bar is displayed, print an empty line when the progress reaches 100%. """
-        if self.output_option == 2:
-            print()
-
 class CheckSyntaxError(CheckError):
     """格式錯誤的相關東西"""
 
     def __init__(self, error_type: dict):
         print('\n首先檢查點號序之中的格式錯誤，像是多打逗點、打錯逗點之類的...')
-        super().__init__('檢查格式錯誤')
+        super().__init__('格式錯誤')
         self.error_type = error_type
 
-    def go_over_files(self, files_data: dict):
+    def go_over_files(self, files_data: dict, file_paths: dict):
         files_dict = {}
         total_error = True
-        self.open_file()
+        self.open_logfile()
         for f in files_data:
             route_dict, no_syntax_error = self.check_syntax(f, files_data[f])
             files_dict[f] = route_dict
             total_error = total_error and no_syntax_error
-        self.close_file()
+            if not no_syntax_error:
+                self.remove_failed_path(file_paths[f])
+        self.close_logfile()
 
         print('格式檢查完畢')
 
@@ -194,17 +268,13 @@ class CheckSyntaxError(CheckError):
                     failed_caption.append('  可能有其他不明錯誤')
 
                 if not new_no_syntax_error:
-                    self.print_result(
-                        '{} ({}/{}) LINE NAME=\"{}\"，有以下格式錯誤：\n'
-                        '{}'.format(file_name, route_num, total_route, LINE_NAME, '\n'.join(failed_caption))
+                    self.print_failed_info(
+                        file_name, route_num, total_route, LINE_NAME, failed_caption
                     )
-                    self.print_result('')
                 
                 no_syntax_error = no_syntax_error and new_no_syntax_error
 
-            self.progress_bar(file_name, route_num, total_route)
-    
-        self.clean_up_progress_bar()
+            progress_bar(file_name, route_num, total_route, self.output_option)
 
         return route_dict, no_syntax_error
     
@@ -212,8 +282,8 @@ class CheckSyntaxError(CheckError):
         """ process route_data based on file_option """
         route_dict = {}
 
+        route_data = re.sub(r';+[^;]+;+\n', '', route_data)
         route_data = route_data.replace('\n', '')
-        route_data = re_sub(r';+[^;]+;+', '', route_data)
         if 'LINE NAME' in route_data:
             route_data = route_data.split('LINE NAME=\"')
             route_data = [rd for rd in route_data if len(rd) > 0 if 'N=' in rd]
@@ -245,24 +315,28 @@ class CheckNodeError(CheckError):
 
     def __init__(self, road_list: dict, node_list: dict):
         print('\n再來檢查點號序之中的點號錯誤，像是重覆點號、點號錯誤之類的...')
-        super().__init__('檢查點號錯誤')
+        super().__init__('點號錯誤')
         self.road_list = road_list
         self.node_list = node_list
         self.checked_result = {}
 
-    def go_over_files(self, files_dict: dict):
-        self.open_file()
+    def go_over_files(self, files_dict: dict, file_paths: dict):
+        self.open_logfile()
+        count = 0
         for f in files_dict:
-            self.line_sanity_check(f, files_dict[f])
-        self.close_file()
+            count += 1
+            no_node_error = self.line_sanity_check(f, files_dict[f])
+            if not no_node_error:
+                self.remove_failed_path(file_paths[f])
+        self.close_logfile()
         print('點號檢查完畢')
 
     def line_sanity_check(self, file_name: str, route_dict: dict):
         """檢查是不是有非區域內道路混進來了"""
-        self.open_file()
-
         num_checked_line = 0
         total_line = len(route_dict.keys())
+        progress_bar(file_name, num_checked_line, total_line, self.output_option)
+        no_node_error = True
         for line_name in route_dict:
             num_checked_line += 1
             passed_node_str = route_dict[line_name]
@@ -278,86 +352,89 @@ class CheckNodeError(CheckError):
                 if (p1, p2) not in self.road_list:
                     if_fail = True
                     failed_pair.append((p1, p2))
-                    
+            
+            no_node_error = no_node_error and (not if_fail)
             if if_fail:
-                #處理頭尾同點
-                FP_no_same_pt = []
-                for (p1, p2) in failed_pair:
-                    if p1 == p2:
-                        failed_caption.append(' {}, {}  (首尾同點)'.format(p1, p2))
-                    else:
-                        FP_no_same_pt.append((p1, p2))
+                if self.debug_option:
+                    #處理頭尾同點
+                    FP_no_same_pt = []
+                    for (p1, p2) in failed_pair:
+                        if p1 == p2:
+                            failed_caption.append(' {}, {}  (首尾同點)'.format(p1, p2))
+                        else:
+                            FP_no_same_pt.append((p1, p2))
 
-                #將連續錯誤編入同一個list
-                FP_group = []
-                temp_group = []
-                temp_end = 0
-                for (p1, p2) in FP_no_same_pt:
-                    if p1 != temp_end and temp_group != []:
+                    #將連續錯誤編入同一個list
+                    FP_group = []
+                    temp_group = []
+                    temp_end = 0
+                    for (p1, p2) in FP_no_same_pt:
+                        if p1 != temp_end and temp_group != []:
+                            FP_group.append(temp_group)
+                            temp_group = []
+                        temp_group.append((p1, p2))
+                        temp_end = p2
+                    if temp_group != []:
                         FP_group.append(temp_group)
-                        temp_group = []
-                    temp_group.append((p1, p2))
-                    temp_end = p2
-                if temp_group != []:
-                    FP_group.append(temp_group)
 
-                for group in FP_group:
-                    failed_path = [group[0][0]]
-                    for p in group:
-                        failed_path.append(p[1])
-                    
-                    p1 = failed_path[0]
-                    p2 = failed_path[-1]
+                    for group in FP_group:
+                        failed_path = [group[0][0]]
+                        for p in group:
+                            failed_path.append(p[1])
+                        
+                        p1 = failed_path[0]
+                        p2 = failed_path[-1]
 
-                    head_index = stop_pair.index(group[0])
-                    if head_index == 0:
-                        p0 = p1
-                    else:
-                        p0 = stop_pair[head_index-1][0]
-                    
-                    tail_index = stop_pair.index(group[-1])
-                    if tail_index == len(stop_pair) - 1:
-                        p3 = p2
-                    else:
-                        p3 = stop_pair[tail_index+1][1]
-                    
-                    found = False
-                    # p1 -> p2
-                    if not found:
-                        section_type = '中間有誤'
-                        failed_caption, found = self.check_section(
-                            p1, p2, failed_path, section_type, failed_caption)
+                        head_index = stop_pair.index(group[0])
+                        if head_index == 0:
+                            p0 = p1
+                        else:
+                            p0 = stop_pair[head_index-1][0]
+                        
+                        tail_index = stop_pair.index(group[-1])
+                        if tail_index == len(stop_pair) - 1:
+                            p3 = p2
+                        else:
+                            p3 = stop_pair[tail_index+1][1]
+                        
+                        found = False
+                        # p1 -> p2
+                        if not found:
+                            section_type = '中間有誤'
+                            failed_caption, found = self.check_section(
+                                p1, p2, failed_path, section_type, failed_caption)
 
-                    # p0 -> p2
-                    if not found and p0 != p1:
-                        section_type = '中間有誤、第一點({})可能有誤'.format(p1)
-                        failed_caption, found = self.check_section(
-                            p0, p2, failed_path, section_type, failed_caption)
+                        # p0 -> p2
+                        if not found and p0 != p1:
+                            section_type = '中間有誤、第一點({})可能有誤'.format(p1)
+                            failed_caption, found = self.check_section(
+                                p0, p2, failed_path, section_type, failed_caption)
 
-                    # p1 -> p3
-                    if not found and p3 != p2:
-                        section_type = '中間有誤、最後點({})可能有誤'.format(p2)
-                        failed_caption, found = self.check_section(
-                            p1, p3, failed_path, section_type, failed_caption)
+                        # p1 -> p3
+                        if not found and p3 != p2:
+                            section_type = '中間有誤、最後點({})可能有誤'.format(p2)
+                            failed_caption, found = self.check_section(
+                                p1, p3, failed_path, section_type, failed_caption)
 
-                    # p0 -> p3
-                    if not found and p0 != p1 and p3 != p2:
-                        section_type = '中間有誤、頭尾點({} & {})可能有誤'.format(p1, p2)
-                        failed_caption, found = self.check_section(
-                            p0, p3, failed_path, section_type, failed_caption)
-                    
-                    if not found:
-                        failed_caption.append(' {}  (其他錯誤)'.format(', '.join(map(str, failed_path))))
+                        # p0 -> p3
+                        if not found and p0 != p1 and p3 != p2:
+                            section_type = '中間有誤、頭尾點({} & {})可能有誤'.format(p1, p2)
+                            failed_caption, found = self.check_section(
+                                p0, p3, failed_path, section_type, failed_caption)
+                        
+                        if not found:
+                            failed_caption.append(
+                                ' {}  (其他錯誤)'.format(', '.join(map(str, failed_path)))
+                            )
 
-                self.print_result(
-                    '{} ({}/{}) LINE NAME=\"{}\"，下列區間不在路網內：\n' 
-                    '{}\n\n'.format(file_name, num_checked_line, total_line, line_name, '\n'.join(failed_caption))
+                self.print_failed_info(
+                    file_name, num_checked_line, total_line, line_name, failed_caption
                 )
 
             # progress bar
-            self.progress_bar(file_name, num_checked_line, total_line)
-
-        self.clean_up_progress_bar()
+            progress_bar(file_name, num_checked_line, total_line, self.output_option)
+            
+        return no_node_error
     
     def check_section(self, st: int, ed: int, failed_path: list, section_type: str, failed_caption: list):
         found = False
@@ -543,21 +620,21 @@ class LatLonToTWD97(object):
 def main():
 
     error_type = {
-        '以逗點結尾': re_compile(r'-*\d+,+\s*$'),
-        '連續逗點': re_compile(r'-*\d+,\s*,\s*-*\d+'),
-        '點號數字過多': re_compile(r'-*\d{6,}'),
-        '把逗點打成句點': re_compile(r'-*\d+\.\s*-*\d+'),
-        '兩點號間有空格無逗號': re_compile(r'-*\d+\s+-*\d+'),
-        '兩負點號間無空格無逗號': re_compile(r'-*\d+-+\d+'),
-        '連續負號': re_compile(r'\s*-\s*-\s*\d+'),
-        '負號跟數字之間有空格': re_compile(r'-\s+\d+'),
-        '負號不是連接數字': re_compile(r'-\D+'),
-        '第一點為負點號': re_compile(r'^-\d+'),
-        '最後一點為負點號': re_compile(r'-\d+,*\s*$'),
+        '以逗點結尾': re.compile(r'-*\d+,+\s*$'),
+        '連續逗點': re.compile(r'-*\d+,\s*,\s*-*\d+'),
+        '點號數字過多': re.compile(r'-*\d{6,}'),
+        '把逗點打成句點': re.compile(r'-*\d+\.\s*-*\d+'),
+        '兩點號間有空格無逗號': re.compile(r'-*\d+\s+-*\d+'),
+        '兩負點號間無空格無逗號': re.compile(r'-*\d+-+\d+'),
+        '連續負號': re.compile(r'\s*-\s*-\s*\d+'),
+        '負號跟數字之間有空格': re.compile(r'-\s+\d+'),
+        '負號不是連接數字': re.compile(r'-\D+'),
+        '第一點為負點號': re.compile(r'^-\d+'),
+        '最後一點為負點號': re.compile(r'-\d+,*\s*$'),
     }
 
-    node_csv_path = 'C_TWN_ROAD_picked_node.csv'
-    road_csv_path = 'C_TWN_ROAD_picked.csv'
+    node_csv_path = 'P:/09091-中臺區域模式/Working/98_GIS/road/CSV/C_TWN_ROAD_picked_node.csv'
+    road_csv_path = 'P:/09091-中臺區域模式/Working/98_GIS/road/CSV/C_TWN_ROAD_picked.csv'
     pass_all = False
 
     # check node file
@@ -572,19 +649,28 @@ def main():
 
         file_paths = get_file_name()
         files_data = {}
+        files_read = 0
+        total_files = len(file_paths.keys())
+        progress_bar('已讀取檔案數', files_read, total_files)
         for file_name in file_paths:
-            with open(file_paths[file_name], 'r', encoding = "Big5") as routes:
-                files_data[file_name] = routes.read()
-
+            try:
+                with open(file_paths[file_name], 'r', encoding = "Big5") as routes:
+                    files_data[file_name] = routes.read()
+            except:
+                with open(file_paths[file_name], 'r', encoding = "UTF-8") as routes:
+                    files_data[file_name] = routes.read()
+            files_read += 1
+            progress_bar('已讀取檔案數', files_read, total_files)
+            
         SyntaxCheck = CheckSyntaxError(error_type)
-        files_dict, no_syntax_error = SyntaxCheck.go_over_files(files_data)
+        files_dict, no_syntax_error = SyntaxCheck.go_over_files(files_data, file_paths)
 
         if no_syntax_error:
             NodeCheck = CheckNodeError(road_list, node_list)
-            NodeCheck.go_over_files(files_dict)
+            NodeCheck.go_over_files(files_dict, file_paths)
             input('檢查完畢')
         else:
-            input('公車路線資料檔內有格式錯誤，結束程式')
+            input('公車路線資料有格式錯誤，結束程式')
 
 if __name__ == '__main__':
     main()

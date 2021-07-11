@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 
 import os
-import os.path
 import re
 import csv
 from math import cos, radians, sin, sqrt, tan
@@ -31,67 +30,270 @@ def check_csv_file(file_name: str, file_type: str, pass_all: bool):
 
     return file_name, pass_all
 
-def get_road_list(road_csv_path: str):
-    road_list = {}
-    with open(road_csv_path, newline='') as road_csv:
-        road_row = csv.reader(road_csv)
-        
-        first = True
-        for r in road_row:
-            if first:
-                LENGTH = r.index('LENGTH')
-                A = r.index('A')
-                B = r.index('B')
-                DIR1 = r.index('DIR1')
-                first = False
-            else:
-                if int(r[DIR1]) == 0:
-                    road_list[(int(r[A]), int(r[B]))] = float(r[LENGTH])
-                    road_list[(int(r[B]), int(r[A]))] = float(r[LENGTH])
-                elif int(r[DIR1]) == 1:
-                    road_list[(int(r[A]), int(r[B]))] = float(r[LENGTH])
+class ImportNetwork():
+    @staticmethod
+    def get_road_list(road_csv_path: str, excluded_roadtype: list):
+        road_dict = {}
+        with open(road_csv_path, newline='', encoding='utf-8') as road_csv:
+            road_row = csv.reader(road_csv)
+            first = True
+            for r in road_row:
+                if first:
+                    roadtype = r.index('ROADTYPE')
+                    length = r.index('LENGTH')
+                    A = r.index('A')
+                    B = r.index('B')
+                    dir = r.index('DIR')
+                    spdclass = r.index('SPDCLASS')
+                    first = False
                 else:
-                    road_list[(int(r[B]), int(r[A]))] = float(r[LENGTH])
-    
-    print('完成道路讀取...')
-    return road_list
+                    if r[roadtype] not in excluded_roadtype:
+                        if int(r[spdclass]) <= 2:
+                            speed = 100
+                        elif int(r[spdclass]) <= 4:
+                            speed = 90
+                        elif int(r[spdclass]) <= 19:
+                            speed = 60
+                        elif int(r[spdclass]) <= 34:
+                            speed = 50
+                        else:
+                            speed = 40
+                        travel_time = float(r[length]) / speed
+                        if int(r[dir]) == 0 or int(r[dir]) == 2:
+                            road_dict[(int(r[A]), int(r[B]))] = travel_time
+                            road_dict[(int(r[B]), int(r[A]))] = travel_time
+                        elif int(r[dir]) == 1:
+                            road_dict[(int(r[A]), int(r[B]))] = travel_time
+                        else:
+                            road_dict[(int(r[B]), int(r[A]))] = travel_time
+        
+        print('完成道路讀取...')
+        return road_dict
 
-def get_node_list(node_csv_path: str):
-    node_list = {}
-    with open(node_csv_path, newline='') as node_csv:
-        node_row = csv.reader(node_csv)
+    @staticmethod
+    def get_node_list(node_csv_path: str, min_N: int, max_N: int):
+        node_list = {}
+        with open(node_csv_path, newline='', encoding='utf-8') as node_csv:
+            node_row = csv.reader(node_csv)
+            first = True
+            for n in node_row:
+                if first:
+                    N = n.index('N')
+                    X = n.index('X')
+                    Y = n.index('Y')
+                    first = False
+                else:
+                    if int(n[N]) <= max_N and int(n[N]) >= min_N:
+                        node_list[int(n[N])] = LatLonToTWD97().convert(radians(float(n[Y])), radians(float(n[X])))
+            
+        print('完成節點讀取...')
+        return node_list
+
+    @staticmethod
+    def generate_tree(node_dict: dict, road_dict: dict):
+        road_tree = {n: [] for n in node_dict}
+        for r in road_dict:
+            road_tree[r[0]].append(r[1])
+        print('完成相鄰節點建立...')
+        return road_tree
+
+class ShortestPath(object):
+    """尋找最短路徑"""
+
+    def __init__(self, node_dict: dict, road_dict: dict, road_tree: dict):
+        self.node_dict = node_dict
+        self.road_dict = road_dict
+        self.road_tree = road_tree
+
+    def find_shortest_path(self, OD_node: list, max_level: int = 1000):
+        p1 = OD_node[0]
+        p2 = OD_node[1]
+        # 兩點相鄰
+        if (p1, p2) in self.road_dict:
+            return [p1, p2], self.road_dict[(p1, p2)]
+
+        if p1 in self.node_dict and p2 in self.node_dict:
+            path, distance = self.a_star_alg(p1, p2, max_level)
+            return path, distance
+
+    def a_star_alg(self, p1: int, p2: int, max_level: int = 1000):
+        """Returns a list of nodes as a path from the given start to the given end in the given road network"""
         
-        first = True
-        for n in node_row:
-            if first:
-                N = n.index('N')
-                X = n.index('X')
-                Y = n.index('Y')
-                first = False
-            else:
-                node_list[int(n[N])] = (float(n[X]), float(n[Y]))
+        # Create start and end node
+        start_node = Node(None, p1, self.node_dict[p1])
+        start_node.g = start_node.h = start_node.f = 0
+        end_node = Node(None, p2, self.node_dict[p2])
+        end_node.g = end_node.h = end_node.f = 0
+
+        # Initialize both open and closed list
+        open_list = []
+        closed_list = []
+
+        # Add the start node
+        open_list.append(start_node)
+
+        # Loop until you find the end
+        level = 0
+        while len(open_list) > 0 and level < max_level:
+            level += 1
+
+            # Get the current node (the node in open_list with the lowest cost)
+            current_node = open_list[0]
+            current_index = 0
+            for index, item in enumerate(open_list):
+                if item.f < current_node.f:
+                    current_node = item
+                    current_index = index
+
+            # Pop current off open list, add to closed list
+            open_list.pop(current_index)
+            closed_list.append(current_node)
+
+            # Found the goal
+            if current_node == end_node:
+                path = []
+                distance = current_node.g
+                current = current_node
+                while current is not None:
+                    path.append(current.number)
+                    current = current.parent
+
+                return path[::-1], distance # Return reversed path
+
+            # Generate children
+            children = []
+            for new_number in self.road_tree[current_node.number]: # Adjacent nodes
+                new_node = Node(current_node, new_number, self.node_dict[new_number])
+                children.append(new_node)
+
+            # Loop through children
+            for child in children:
+                append_to_open_list = False
+
+                # Create the f, g, and h values
+                child.g = current_node.g + self.road_dict[(current_node.number, child.number)]
+                child.h = sqrt((child.x - end_node.x) ** 2 + (child.y - end_node.y) ** 2) / 200
+                child.f = child.g + child.h
+
+                # Child is already in the closed list
+                closed_list, append_to_open_list = self.check_in_list(child, closed_list, append_to_open_list)
+
+                # Child is already in the open list
+                open_list, append_to_open_list = self.check_in_list(child, open_list, append_to_open_list)
+
+                # Add the child to the open list
+                if append_to_open_list:
+                    open_list.append(child)
+
+        return [], 1e10
+
+    @staticmethod
+    def check_in_list(child, check_list, append_to_open_list):
+        '''check if the child is in open or closed list'''
+        child_in_check_list = [index for index, check_node in enumerate(check_list) if check_node == child]
+        if len(child_in_check_list) > 0:
+            for index in child_in_check_list:
+                if child.g < check_list[index].g:
+                    check_list.pop(index)
+                    append_to_open_list = True
+                    break
+        else:
+            append_to_open_list = True
         
-    print('完成節點讀取...')
-    return node_list
+        return check_list, append_to_open_list
+
+class Node():
+    """A node class for A* Pathfinding"""
+
+    def __init__(self, parent=None, number=None, coord=None):
+        self.parent = parent
+        self.number = number
+        self.x, self.y = coord[0], coord[1]
+        self.g = 0
+        self.h = 0
+        self.f = 0
+
+    def __eq__(self, other):
+        return self.number == other.number
+
+class LatLonToTWD97(object):
+    """This object provide method for converting lat/lon coordinate to TWD97
+    coordinate
+
+    the formula reference to
+    http://www.uwgb.edu/dutchs/UsefulData/UTMFormulas.htm (there is lots of typo)
+    http://www.offshorediver.com/software/utm/Converting UTM to Latitude and Longitude.doc
+
+    Parameters reference to
+    http://rskl.geog.ntu.edu.tw/team/gis/doc/ArcGIS/WGS84%20and%20TM2.htm
+    http://blog.minstrel.idv.tw/2004/06/taiwan-datum-parameter.html
+    """
+
+    def __init__(self, a = 6378137.0, b = 6356752.314245, long0 = radians(121), k0 = 0.9999, dx = 250000,):
+        self.a = a # Equatorial radius
+        self.b = b # Polar radius
+        self.long0 = long0 # central meridian of zone
+        self.k0 = k0 # scale along long0
+        self.dx = dx # delta x in meter
+
+    def convert(self, lat, lon):
+        """Convert lat lon to twd97"""
+        a = self.a
+        b = self.b
+        long0 = self.long0
+        k0 = self.k0
+        dx = self.dx
+
+        e = (1 - b ** 2 / a ** 2) ** 0.5
+        e2 = e ** 2 / (1 - e ** 2)
+        n = (a - b) / (a + b)
+        nu = a / (1 - (e ** 2) * (sin(lat) ** 2)) ** 0.5
+        p = lon - long0
+
+        A = a * (1 - n + (5 / 4.0) * (n ** 2 - n ** 3) + (81 / 64.0)*(n ** 4  - n ** 5))
+        B = (3 * a * n / 2.0) * (1 - n + (7 / 8.0) * (n ** 2 - n ** 3) + (55 / 64.0) * (n ** 4 - n ** 5))
+        C = (15 * a * (n ** 2) / 16.0) * (1 - n + (3 / 4.0) * (n ** 2 - n ** 3))
+        D = (35 * a * (n ** 3) / 48.0) * (1 - n + (11 / 16.0) * (n ** 2 - n ** 3))
+        E = (315 * a * (n ** 4) / 51.0) * (1 - n)
+
+        S = A * lat - B * sin(2 * lat) + C * sin(4 * lat) - D * sin(6 * lat) + E * sin(8 * lat)
+
+        K1 = S * k0
+        K2 = k0 * nu * sin(2 * lat)/4.0
+        K3 = (k0 * nu * sin(lat) * (cos(lat) ** 3) / 24.0) * \
+            (5 - tan(lat) ** 2 + 9 * e2 * (cos(lat) ** 2) + 4 * (e2 ** 2) * (cos(lat) ** 4))
+
+        y = K1 + K2 * (p ** 2) + K3 * (p ** 4)
+
+        K4 = k0 * nu * cos(lat)
+        K5 = (k0 * nu * (cos(lat) ** 3) / 6.0) * (1 - tan(lat) ** 2 + e2 * (cos(lat) ** 2))
+
+        x = K4 * p + K5 * (p ** 3) + dx
+        return x, y
 
 def get_file_name():
     file_names = {}
-    folder_option = input(
-        '請問要檢查單一檔案還是資料夾內的全部檔案呢？\n'
-        '1 = 單一檔案\n'
-        '2 = 資料夾內的全部檔案\n'
-        '請輸入1或2：')
+    folder_option = ''
+    while folder_option != '1' and folder_option != '2':
+        folder_option = input(
+            '請問要檢查單一檔案還是資料夾內的全部檔案呢？\n'
+            '1 = 單一檔案\n'
+            '2 = 資料夾內的全部檔案\n'
+            '請輸入1或2：')
 
     if folder_option == '1':
-        file_name = input('請輸入公車路線資料檔名(包含副檔名, *.lin, *.txt, ...)：')
-        while not os.path.isfile(file_name):
-            file_name = input('無此檔案，請重新輸入：')
+        file_name = None
+        while file_name is None or (
+            not os.path.isfile(file_name) and 
+            not (file_name.endswith(".lin") or file_name.endswith(".txt"))
+        ):
+            file_name = input('請輸入公車路線資料檔名(包含副檔名: *.lin 或 *.txt)：')
         file_names[file_name] = file_name
     
-    elif folder_option == '2':
-        folder_name = input('請輸入資料夾路徑：')
-        while not os.path.isdir(folder_name):
-            folder_name = input('無此資料夾，請重新輸入：')
+    else:
+        folder_name = None
+        while folder_name is None or not os.path.isdir(folder_name):
+            folder_name = input('請輸入資料夾路徑：')
 
         for f in os.listdir(folder_name):
             if f.endswith(".lin") or f.endswith(".txt"):
@@ -122,9 +324,10 @@ class CheckError(object):
         self.get_remove_option()
 
     def get_debug_option(self):
-        debug_str = input('\n發現{}時，要提示錯誤型態或可能解法嗎？[Y/N]: '.format(self.check_type))
+        debug_str = ''
         while debug_str.upper() != 'Y' and debug_str.upper() != 'N':
-            debug_str = input('[Y/N]: ')
+            debug_str = input('\n發現{}時，要提示錯誤型態或可能解法嗎？[Y/N]: '.format(self.check_type))
+        
         if debug_str.upper() == 'Y':
             debug_option = True
         else:
@@ -133,44 +336,42 @@ class CheckError(object):
         self.debug_option = debug_option
 
     def get_output_option(self):
-        output_option = input(
-            '\n要如何顯示檢查{}的結果呢？\n'
-            '1 = 直接顯示在這邊\n'
-            '2 = 輸出到一個文字檔\n'
-            '請輸入1或2：'.format(self.check_type))
+        output_option = ''
         while output_option != '1' and output_option != '2':
-            output_option = input('請輸入1或2：')
-        output_option = int(output_option)
+            output_option = input(
+                '\n要如何顯示檢查{}的結果呢？\n'
+                '1 = 直接顯示在這邊\n'
+                '2 = 輸出到一個文字檔\n'
+                '請輸入1或2：'.format(self.check_type))
 
-        if output_option == 2:
-            result_filename = input(
-                '請輸入{}結果輸出檔名(要包含.txt)：'.format(self.check_type)
-            )
-            while re.match(r'.*\.txt', result_filename) is None:
+        if output_option == '2':
+            result_filename = ''
+            while not result_filename.endswith('.txt'):
                 result_filename = input(
-                    '格式不符，請重新輸入{}結果輸出檔名(要包含.txt)：'.format(self.check_type)
+                    '請輸入{}結果輸出檔名(要包含.txt)：'.format(self.check_type)
                 )
         else:
             result_filename = None
 
-        self.output_option = output_option
+        self.output_option = int(output_option)
         self.result_filename = result_filename
 
     def get_remove_option(self):
-        remove_option = input(
-            '\n要如何處理有{}的檔案呢？\n'
-            '1 = 不處理\n'
-            '2 = 刪除\n'
-            '3 = 移動到其他地方\n'
-            '請輸入1、2或3：'.format(self.check_type))
+        remove_option = ''
         while remove_option != '1' and remove_option != '2' and remove_option != '3':
-            remove_option = input('請輸入1、2或3：')
+            remove_option = input(
+                '\n要如何處理有{}的檔案呢？\n'
+                '1 = 不處理\n'
+                '2 = 刪除\n'
+                '3 = 移動到其他地方\n'
+                '請輸入1、2或3：'.format(self.check_type)
+            )
         remove_option = int(remove_option)
-
+        
+        trashcan_dir = None
         if remove_option == 3:
-            trashcan_dir = input('請輸入{}檔案移動的目標路徑：'.format(self.check_type))
-        else:
-            trashcan_dir = None
+            while trashcan_dir is None or os.path.isdir(trashcan_dir):
+                trashcan_dir = input('請輸入{}檔案移動的目標路徑：'.format(self.check_type))
         
         self.remove_option = remove_option
         self.trashcan_dir = trashcan_dir
@@ -249,13 +450,13 @@ class CheckSyntaxError(CheckError):
         no_syntax_error = True
         route_num = 0
         total_route = len(route_dict.keys())
-        for LINE_NAME in route_dict:
+        for line_name in route_dict:
             route_num += 1
-            node_seq = route_dict[LINE_NAME]
+            node_seq = route_dict[line_name]
             failed_caption = []
 
             if node_seq != '':
-                route_dict[LINE_NAME] = node_seq
+                route_dict[line_name] = node_seq
                 syntax_error_info, new_no_syntax_error = self.check_node_seq(node_seq)
                 
                 if len(syntax_error_info) > 0:
@@ -269,7 +470,7 @@ class CheckSyntaxError(CheckError):
 
                 if not new_no_syntax_error:
                     self.print_failed_info(
-                        file_name, route_num, total_route, LINE_NAME, failed_caption
+                        file_name, route_num, total_route, line_name, failed_caption
                     )
                 
                 no_syntax_error = no_syntax_error and new_no_syntax_error
@@ -288,10 +489,12 @@ class CheckSyntaxError(CheckError):
             route_data = route_data.split('LINE NAME=\"')
             route_data = [rd for rd in route_data if len(rd) > 0 if 'N=' in rd]
             for rd in route_data:
-                LINE_NAME = rd[:rd.index('\"')]
-                node_seq = rd[rd.index('N=')+2:]
+                line_name = rd[:rd.index('\"')]
+                node_seq = rd[rd.index('N='):] # start from the first N
+                node_seq = node_seq.replace('N=', '')
+                node_seq = re.sub(r'TIME\s*=\s*[0-9\.]+\s*,', '', node_seq)
                 if len(node_seq) > 0:
-                    route_dict[LINE_NAME] = node_seq
+                    route_dict[line_name] = node_seq
         else:
             route_dict['current_line'] = route_data
 
@@ -313,11 +516,10 @@ class CheckSyntaxError(CheckError):
 class CheckNodeError(CheckError):
     """點號錯誤的相關東西"""
 
-    def __init__(self, road_list: dict, node_list: dict):
+    def __init__(self, path_finder: ShortestPath):
         print('\n再來檢查點號序之中的點號錯誤，像是重覆點號、點號錯誤之類的...')
         super().__init__('點號錯誤')
-        self.road_list = road_list
-        self.node_list = node_list
+        self.path_finder = path_finder
         self.checked_result = {}
 
     def go_over_files(self, files_dict: dict, file_paths: dict):
@@ -349,7 +551,7 @@ class CheckNodeError(CheckError):
             if_fail = False
             failed_pair = []
             for (p1, p2) in stop_pair:
-                if (p1, p2) not in self.road_list:
+                if (p1, p2) not in self.path_finder.road_dict:
                     if_fail = True
                     failed_pair.append((p1, p2))
             
@@ -401,35 +603,23 @@ class CheckNodeError(CheckError):
                         # p1 -> p2
                         if not found:
                             section_type = '中間有誤'
-                            failed_caption, found = self.check_section(
-                                p1, p2, failed_path, section_type, failed_caption)
-
+                            failed_caption, found = self.check_section(p1, p2, failed_path, section_type, failed_caption)
                         # p0 -> p2
                         if not found and p0 != p1:
                             section_type = '中間有誤、第一點({})可能有誤'.format(p1)
-                            failed_caption, found = self.check_section(
-                                p0, p2, failed_path, section_type, failed_caption)
-
+                            failed_caption, found = self.check_section(p0, p2, failed_path, section_type, failed_caption)
                         # p1 -> p3
                         if not found and p3 != p2:
                             section_type = '中間有誤、最後點({})可能有誤'.format(p2)
-                            failed_caption, found = self.check_section(
-                                p1, p3, failed_path, section_type, failed_caption)
-
+                            failed_caption, found = self.check_section(p1, p3, failed_path, section_type, failed_caption)
                         # p0 -> p3
                         if not found and p0 != p1 and p3 != p2:
                             section_type = '中間有誤、頭尾點({} & {})可能有誤'.format(p1, p2)
-                            failed_caption, found = self.check_section(
-                                p0, p3, failed_path, section_type, failed_caption)
-                        
+                            failed_caption, found = self.check_section(p0, p3, failed_path, section_type, failed_caption)
                         if not found:
-                            failed_caption.append(
-                                ' {}  (其他錯誤)'.format(', '.join(map(str, failed_path)))
-                            )
+                            failed_caption.append(' {}  (其他錯誤)'.format(', '.join(map(str, failed_path))))
 
-                self.print_failed_info(
-                    file_name, num_checked_line, total_line, line_name, failed_caption
-                )
+                self.print_failed_info(file_name, num_checked_line, total_line, line_name, failed_caption)
 
             # progress bar
             progress_bar(file_name, num_checked_line, total_line, self.output_option)
@@ -441,181 +631,14 @@ class CheckNodeError(CheckError):
         if (st, ed) in self.checked_result:
             path = self.checked_result[(st, ed)]
         else:
-            path, _ = self.check_feasible_path(st, ed)
+            path, _ = self.path_finder.find_shortest_path([st, ed], 10000)
 
         if len(path) > 0:
             found = True
-            failed_caption.append(' {}  ({}，可行解：{})'.format(
-                ', '.join(map(str, failed_path)), section_type, ', '.join(map(str, path))))
+            failed_caption.append(' {}  ({}，可行解：{})'.format(', '.join(map(str, failed_path)), section_type, ', '.join(map(str, path))))
             self.checked_result[(st, ed)] = path
         
         return failed_caption, found
-
-    def check_feasible_path(self, p1: int, p2: int, max_level: int = 500):
-        # 兩點相鄰
-        if (p1, p2) in self.road_list:
-            return [p1, p2], self.road_list[(p1, p2)]
-
-        # 中間隔一點
-        midpoint_list = [line[1] for line in self.road_list if p1 == line[0]]
-        min_dist = 1e10
-        midpoint = 0
-        for m in midpoint_list:
-            if (m, p2) in self.road_list:
-                if self.road_list[(p1, m)] + self.road_list[(m, p2)] < min_dist:
-                    min_dist = self.road_list[(p1, m)] + self.road_list[(m, p2)]
-                    midpoint = m
-        if midpoint != 0:
-            return [p1, midpoint, p2], min_dist
-
-        # 中間隔超過一點
-        if p1 in self.node_list and p2 in self.node_list:
-            path, distance = a_star_alg(p1, p2, self.road_list, self.node_list, max_level)
-            return path, distance
-
-class Node():
-    """A node class for A* Pathfinding"""
-
-    def __init__(self, parent=None, number=None, lonlat=None):
-        self.parent = parent
-        self.number = number
-        self.x, self.y = LatLonToTWD97().convert(radians(lonlat[1]), radians(lonlat[0]))
-        self.g = 0
-        self.h = 0
-        self.f = 0
-
-    def __eq__(self, other):
-        return self.number == other.number
-
-def a_star_alg(p1: int, p2: int, road_list: dict, node_list: dict, max_level: int = 500):
-    """Returns a list of nodes as a path from the given start to the given end in the given road network"""
-    
-    # Create start and end node
-    start_node = Node(None, p1, node_list[p1])
-    start_node.g = start_node.h = start_node.f = 0
-    end_node = Node(None, p2, node_list[p2])
-    end_node.g = end_node.h = end_node.f = 0
-
-    # Initialize both open and closed list
-    open_list = []
-    closed_list = []
-
-    # Add the start node
-    open_list.append(start_node)
-
-    level = 0
-
-    # Loop until you find the end
-    while len(open_list) > 0 and level < max_level:
-        level += 1
-
-        # Get the current node
-        current_node = open_list[0]
-        current_index = 0
-        for index, item in enumerate(open_list):
-            if item.f < current_node.f:
-                current_node = item
-                current_index = index
-
-        # Pop current off open list, add to closed list
-        open_list.pop(current_index)
-        closed_list.append(current_node)
-
-        # Found the goal
-        if current_node == end_node:
-            path = []
-            distance = current_node.g
-            current = current_node
-            while current is not None:
-                path.append(current.number)
-                current = current.parent
-            return path[::-1], distance # Return reversed path
-
-        # Generate children
-        children = []
-        for new_number in [line[1] for line in road_list if current_node.number == line[0]]: # Adjacent nodes
-            new_node = Node(current_node, new_number, node_list[new_number]) # Create new node
-            children.append(new_node) # Append
-
-        # Loop through children
-        for child in children:
-
-            # Child is on the closed list
-            for closed_child in closed_list:
-                if child == closed_child:
-                    continue
-
-            # Create the f, g, and h values
-            child.g = current_node.g + road_list[(current_node.number, child.number)]
-            # child.h = sqrt(((child.x - end_node.x) ** 2) + ((child.y - end_node.y) ** 2))
-            child.h = 0.5 * (abs(child.x - end_node.x) + abs(child.y - end_node.y))
-            child.f = child.g + child.h
-
-            # Child is already in the open list
-            for open_node in open_list:
-                if child == open_node and child.g > open_node.g:
-                    continue
-
-            # Add the child to the open list
-            open_list.append(child)
-
-    return [], 1e10
-
-class LatLonToTWD97(object):
-    """This object provide method for converting lat/lon coordinate to TWD97
-    coordinate
-
-    the formula reference to
-    http://www.uwgb.edu/dutchs/UsefulData/UTMFormulas.htm (there is lots of typo)
-    http://www.offshorediver.com/software/utm/Converting UTM to Latitude and Longitude.doc
-
-    Parameters reference to
-    http://rskl.geog.ntu.edu.tw/team/gis/doc/ArcGIS/WGS84%20and%20TM2.htm
-    http://blog.minstrel.idv.tw/2004/06/taiwan-datum-parameter.html
-    """
-
-    def __init__(self, a = 6378137.0, b = 6356752.314245,
-        long0 = radians(121), k0 = 0.9999, dx = 250000,):
-        self.a = a # Equatorial radius
-        self.b = b # Polar radius
-        self.long0 = long0 # central meridian of zone
-        self.k0 = k0 # scale along long0
-        self.dx = dx # delta x in meter
-
-    def convert(self, lat, lon):
-        """Convert lat lon to twd97"""
-        a = self.a
-        b = self.b
-        long0 = self.long0
-        k0 = self.k0
-        dx = self.dx
-
-        e = (1 - b ** 2 / a ** 2) ** 0.5
-        e2 = e ** 2 / (1 - e ** 2)
-        n = (a - b) / (a + b)
-        nu = a / (1 - (e ** 2) * (sin(lat) ** 2)) ** 0.5
-        p = lon - long0
-
-        A = a * (1 - n + (5 / 4.0) * (n ** 2 - n ** 3) + (81 / 64.0)*(n ** 4  - n ** 5))
-        B = (3 * a * n / 2.0) * (1 - n + (7 / 8.0) * (n ** 2 - n ** 3) + (55 / 64.0) * (n ** 4 - n ** 5))
-        C = (15 * a * (n ** 2) / 16.0) * (1 - n + (3 / 4.0) * (n ** 2 - n ** 3))
-        D = (35 * a * (n ** 3) / 48.0) * (1 - n + (11 / 16.0) * (n ** 2 - n ** 3))
-        E = (315 * a * (n ** 4) / 51.0) * (1 - n)
-
-        S = A * lat - B * sin(2 * lat) + C * sin(4 * lat) - D * sin(6 * lat) + E * sin(8 * lat)
-
-        K1 = S * k0
-        K2 = k0 * nu * sin(2 * lat)/4.0
-        K3 = (k0 * nu * sin(lat) * (cos(lat) ** 3) / 24.0) * \
-            (5 - tan(lat) ** 2 + 9 * e2 * (cos(lat) ** 2) + 4 * (e2 ** 2) * (cos(lat) ** 4))
-
-        y = K1 + K2 * (p ** 2) + K3 * (p ** 4)
-
-        K4 = k0 * nu * cos(lat)
-        K5 = (k0 * nu * (cos(lat) ** 3) / 6.0) * (1 - tan(lat) ** 2 + e2 * (cos(lat) ** 2))
-
-        x = K4 * p + K5 * (p ** 3) + self.dx
-        return x, y
 
 def main():
 
@@ -633,8 +656,8 @@ def main():
         '最後一點為負點號': re.compile(r'-\d+,*\s*$'),
     }
 
-    node_csv_path = 'P:/09091-中臺區域模式/Working/98_GIS/road/CSV/C_TWN_ROAD_picked_node.csv'
-    road_csv_path = 'P:/09091-中臺區域模式/Working/98_GIS/road/CSV/C_TWN_ROAD_picked.csv'
+    node_csv_path = 'P:/09091-中臺區域模式/Working/98_GIS/road/CSV/C_TWN_NET_node.csv'
+    road_csv_path = 'P:/09091-中臺區域模式/Working/98_GIS/road/CSV/C_TWN_NET_link.csv'
     pass_all = False
 
     # check node file
@@ -644,8 +667,11 @@ def main():
     road_csv_path, pass_all = check_csv_file(road_csv_path, '公路節線資料檔', pass_all)
 
     if not pass_all:
-        node_list = get_node_list(node_csv_path)
-        road_list = get_road_list(road_csv_path)
+        excluded_roadtype = ['RR', 'ZL', 'WL', 'TL']
+        node_dict = ImportNetwork.get_node_list(node_csv_path, min_N=5001, max_N=150000)
+        road_dict = ImportNetwork.get_road_list(road_csv_path, excluded_roadtype=excluded_roadtype)
+        road_tree = ImportNetwork.generate_tree(node_dict, road_dict)
+        path_finder = ShortestPath(node_dict, road_dict, road_tree)
 
         file_paths = get_file_name()
         files_data = {}
@@ -666,7 +692,7 @@ def main():
         files_dict, no_syntax_error = SyntaxCheck.go_over_files(files_data, file_paths)
 
         if no_syntax_error:
-            NodeCheck = CheckNodeError(road_list, node_list)
+            NodeCheck = CheckNodeError(path_finder)
             NodeCheck.go_over_files(files_dict, file_paths)
             input('檢查完畢')
         else:

@@ -1,17 +1,15 @@
 # -*- coding: utf-8 -*-
 
+import csv
 import os
 import urllib.parse
 from math import cos, radians, sin, sqrt, tan
-from itertools import tee
 from shutil import copy2
 from typing import List
 
 import pandas as pd
 from PyQt5.QtGui import QFont
-from PyQt5.QtWidgets import QInputDialog, QMessageBox
-
-import processing
+from PyQt5.QtWidgets import QInputDialog, QMessageBox, QFileDialog
 from qgis.analysis import *
 from qgis.core import *
 from qgis.gui import *
@@ -19,27 +17,276 @@ from qgis.PyQt.QtCore import *
 from qgis.PyQt.QtGui import *
 from qgis.utils import *
 
-class ProcessPath(object):
-    """處理站間路徑相關"""
 
-    def save(self, path_list: List[int], save_dir: str):
+class GetFile():
+    @staticmethod
+    def get_dir(dir_description: str, ):
+        while True:
+            result_dir = QFileDialog.getExistingDirectory(None, dir_description, )
+            if os.path.isdir(result_dir):
+                return result_dir
+
+    @staticmethod
+    def get_file():
+        pass
+
+class ImportNetwork():
+    @staticmethod
+    def get_road_list(road_csv_path: str, excluded_roadtype: List[str]):
+        road_dict = {}
+        with open(road_csv_path, newline='', encoding='utf-8') as road_csv:
+            road_row = csv.reader(road_csv)
+            first = True
+            for r in road_row:
+                if first:
+                    roadtype = r.index('ROADTYPE')
+                    length = r.index('LENGTH')
+                    A = r.index('A')
+                    B = r.index('B')
+                    dir = r.index('DIR')
+                    spdclass = r.index('SPDCLASS')
+                    first = False
+                else:
+                    if r[roadtype] not in excluded_roadtype:
+                        if int(r[spdclass]) <= 2:
+                            speed = 100
+                        elif int(r[spdclass]) <= 4:
+                            speed = 90
+                        elif int(r[spdclass]) <= 19:
+                            speed = 60
+                        elif int(r[spdclass]) <= 34:
+                            speed = 50
+                        else:
+                            speed = 40
+                        travel_time = float(r[length]) / speed
+                        if int(r[dir]) == 0 or int(r[dir]) == 2:
+                            road_dict[(int(r[A]), int(r[B]))] = travel_time
+                            road_dict[(int(r[B]), int(r[A]))] = travel_time
+                        elif int(r[dir]) == 1:
+                            road_dict[(int(r[A]), int(r[B]))] = travel_time
+                        else:
+                            road_dict[(int(r[B]), int(r[A]))] = travel_time
+        
+        print('完成道路讀取...')
+        return road_dict
+
+    @staticmethod
+    def get_node_list(node_csv_path: str, min_N: int, max_N: int):
+        node_list = {}
+        with open(node_csv_path, newline='', encoding='utf-8') as node_csv:
+            node_row = csv.reader(node_csv)
+            first = True
+            for n in node_row:
+                if first:
+                    N = n.index('N')
+                    X = n.index('X')
+                    Y = n.index('Y')
+                    first = False
+                else:
+                    if int(n[N]) <= max_N and int(n[N]) >= min_N:
+                        node_list[int(n[N])] = LatLonToTWD97().convert(radians(float(n[Y])), radians(float(n[X])))
+            
+        print('完成節點讀取...')
+        return node_list
+
+    @staticmethod
+    def generate_tree(node_dict: dict, road_dict: dict):
+        road_tree = {n: [] for n in node_dict}
+        for r in road_dict:
+            road_tree[r[0]].append(r[1])
+        print('完成相鄰節點建立...')
+        return road_tree
+
+class ShortestPath(object):
+    """尋找最短路徑"""
+
+    def __init__(self, node_dict: dict, road_dict: dict, road_tree: dict):
+        self.node_dict = node_dict
+        self.road_dict = road_dict
+        self.road_tree = road_tree
+
+    def find_shortest_path(self, OD_node: List[int], max_level: int = 1000):
+        p1 = OD_node[0]
+        p2 = OD_node[1]
+        # 兩點相鄰
+        if (p1, p2) in self.road_dict:
+            return [p1, p2], self.road_dict[(p1, p2)]
+
+        if p1 in self.node_dict and p2 in self.node_dict:
+            path, distance = self.a_star_alg(p1, p2, max_level)
+            return path, distance
+
+    def a_star_alg(self, p1: int, p2: int, max_level: int = 1000):
+        """Returns a list of nodes as a path from the given start to the given end in the given road network"""
+        
+        # Create start and end node
+        start_node = Node(None, p1, self.node_dict[p1])
+        start_node.g = start_node.h = start_node.f = 0
+        end_node = Node(None, p2, self.node_dict[p2])
+        end_node.g = end_node.h = end_node.f = 0
+
+        # Initialize both open and closed list
+        open_list = []
+        closed_list = []
+
+        # Add the start node
+        open_list.append(start_node)
+
+        # Loop until you find the end
+        level = 0
+        while len(open_list) > 0 and level < max_level:
+            level += 1
+
+            # Get the current node (the node in open_list with the lowest cost)
+            current_node = open_list[0]
+            current_index = 0
+            for index, item in enumerate(open_list):
+                if item.f < current_node.f:
+                    current_node = item
+                    current_index = index
+
+            # Pop current off open list, add to closed list
+            open_list.pop(current_index)
+            closed_list.append(current_node)
+
+            # Found the goal
+            if current_node == end_node:
+                path = []
+                distance = current_node.g
+                current = current_node
+                while current is not None:
+                    path.append(current.number)
+                    current = current.parent
+
+                return path[::-1], distance # Return reversed path
+
+            # Generate children
+            children = []
+            for new_number in self.road_tree[current_node.number]: # Adjacent nodes
+                new_node = Node(current_node, new_number, self.node_dict[new_number])
+                children.append(new_node)
+
+            # Loop through children
+            for child in children:
+                append_to_open_list = False
+
+                # Create the f, g, and h values
+                child.g = current_node.g + self.road_dict[(current_node.number, child.number)]
+                child.h = sqrt((child.x - end_node.x) ** 2 + (child.y - end_node.y) ** 2) / 200
+                child.f = child.g + child.h
+
+                # Child is already in the closed list
+                closed_list, append_to_open_list = self.check_in_list(child, closed_list, append_to_open_list)
+
+                # Child is already in the open list
+                open_list, append_to_open_list = self.check_in_list(child, open_list, append_to_open_list)
+
+                # Add the child to the open list
+                if append_to_open_list:
+                    open_list.append(child)
+
+        return [], 1e10
+
+    @staticmethod
+    def check_in_list(child, check_list, append_to_open_list):
+        '''check if the child is in open or closed list'''
+        child_in_check_list = [index for index, check_node in enumerate(check_list) if check_node == child]
+        if len(child_in_check_list) > 0:
+            for index in child_in_check_list:
+                if child.g < check_list[index].g:
+                    check_list.pop(index)
+                    append_to_open_list = True
+                    break
+        else:
+            append_to_open_list = True
+        
+        return check_list, append_to_open_list
+
+class Node():
+    """A node class for A* Pathfinding"""
+
+    def __init__(self, parent=None, number=None, coord=None):
+        self.parent = parent
+        self.number = number
+        self.x, self.y = coord[0], coord[1]
+        self.g = 0
+        self.h = 0
+        self.f = 0
+
+    def __eq__(self, other):
+        return self.number == other.number
+
+class LatLonToTWD97(object):
+    """This object provide method for converting lat/lon coordinate to TWD97
+    coordinate
+
+    the formula reference to
+    http://www.uwgb.edu/dutchs/UsefulData/UTMFormulas.htm (there is lots of typo)
+    http://www.offshorediver.com/software/utm/Converting UTM to Latitude and Longitude.doc
+
+    Parameters reference to
+    http://rskl.geog.ntu.edu.tw/team/gis/doc/ArcGIS/WGS84%20and%20TM2.htm
+    http://blog.minstrel.idv.tw/2004/06/taiwan-datum-parameter.html
+    """
+
+    def __init__(self, a = 6378137.0, b = 6356752.314245, long0 = radians(121), k0 = 0.9999, dx = 250000,):
+        self.a = a # Equatorial radius
+        self.b = b # Polar radius
+        self.long0 = long0 # central meridian of zone
+        self.k0 = k0 # scale along long0
+        self.dx = dx # delta x in meter
+
+    def convert(self, lat, lon):
+        """Convert lat lon to twd97"""
+        a = self.a
+        b = self.b
+        long0 = self.long0
+        k0 = self.k0
+        dx = self.dx
+
+        e = (1 - b ** 2 / a ** 2) ** 0.5
+        e2 = e ** 2 / (1 - e ** 2)
+        n = (a - b) / (a + b)
+        nu = a / (1 - (e ** 2) * (sin(lat) ** 2)) ** 0.5
+        p = lon - long0
+
+        A = a * (1 - n + (5 / 4.0) * (n ** 2 - n ** 3) + (81 / 64.0)*(n ** 4  - n ** 5))
+        B = (3 * a * n / 2.0) * (1 - n + (7 / 8.0) * (n ** 2 - n ** 3) + (55 / 64.0) * (n ** 4 - n ** 5))
+        C = (15 * a * (n ** 2) / 16.0) * (1 - n + (3 / 4.0) * (n ** 2 - n ** 3))
+        D = (35 * a * (n ** 3) / 48.0) * (1 - n + (11 / 16.0) * (n ** 2 - n ** 3))
+        E = (315 * a * (n ** 4) / 51.0) * (1 - n)
+
+        S = A * lat - B * sin(2 * lat) + C * sin(4 * lat) - D * sin(6 * lat) + E * sin(8 * lat)
+
+        K1 = S * k0
+        K2 = k0 * nu * sin(2 * lat)/4.0
+        K3 = (k0 * nu * sin(lat) * (cos(lat) ** 3) / 24.0) * \
+            (5 - tan(lat) ** 2 + 9 * e2 * (cos(lat) ** 2) + 4 * (e2 ** 2) * (cos(lat) ** 4))
+
+        y = K1 + K2 * (p ** 2) + K3 * (p ** 4)
+
+        K4 = k0 * nu * cos(lat)
+        K5 = (k0 * nu * (cos(lat) ** 3) / 6.0) * (1 - tan(lat) ** 2 + e2 * (cos(lat) ** 2))
+
+        x = K4 * p + K5 * (p ** 3) + dx
+        return x, y
+
+class ProcessPath():
+    """處理站間路徑相關"""
+    
+    @staticmethod
+    def save(path_list: List[int], save_dir: str, path_filename: str):
         """把站牌間路徑儲存成文字檔"""
         path_str = ','.join(map(str, path_list))
-        if len(path_list) == 1:
-            path_path = os.path.join(
-                save_dir, '{}_{}.txt'.format(path_list[0], path_list[0])
-            ) #路徑的路徑
-        else:
-            path_path = os.path.join(
-                save_dir, '{}_{}.txt'.format(path_list[0], path_list[-1])
-            ) #路徑的路徑
+        path_path = os.path.join(save_dir, '{}.txt'.format(path_filename)) #路徑的路徑
         path_file = open(path_path, 'w')
         path_file.write(path_str)
         path_file.close()
 
-    def load(self, OD_node: List[int], load_dir: str):
+    @staticmethod
+    def load(OD_node: List[int], load_dir: str, path_filename: str):
         """讀取已經儲存的站牌間路徑"""
-        path_path = os.path.join(load_dir, '{}_{}.txt'.format(OD_node[0], OD_node[1]))
+        path_path = os.path.join(load_dir, '{}.txt'.format(path_filename))
         if_saved = os.path.isfile(path_path)
         
         if if_saved:
@@ -54,7 +301,8 @@ class ProcessPath(object):
         
         return path, not if_saved
 
-    def move(self, ori_node: int, des_node: int, ori_dir: str, des_dir: str):
+    @staticmethod
+    def move(ori_node: int, des_node: int, ori_dir: str, des_dir: str):
         sucess = False
         ori_file = os.path.join(ori_dir, '{}_{}.txt'.format(ori_node, des_node))
         if os.path.isfile(ori_file):
@@ -62,7 +310,8 @@ class ProcessPath(object):
             sucess = True
         return sucess
 
-    def get_file_list(self, folder):
+    @staticmethod
+    def get_file_list(folder):
         """return a list of the filename in the folder"""
         result = []
         if os.path.isdir(folder):
@@ -83,12 +332,8 @@ class SearchGeometry(object):
         distance = 1e10
         if point_pair is not None and (point_pair[0] != [] and point_pair[1] != []):
             if point_pair[0].x() < 1000:
-                x0, y0 = LatLonToTWD97().convert(
-                    radians(point_pair[0].y()), radians(point_pair[0].x())
-                )
-                x1, y1 = LatLonToTWD97().convert(
-                    radians(point_pair[1].y()), radians(point_pair[1].x())
-                )
+                x0, y0 = LatLonToTWD97().convert(radians(point_pair[0].y()), radians(point_pair[0].x()))
+                x1, y1 = LatLonToTWD97().convert(radians(point_pair[1].y()), radians(point_pair[1].x()))
             else:
                 x0 = point_pair[0].x()
                 y0 = point_pair[0].y()
@@ -111,47 +356,15 @@ class SearchGeometry(object):
                     feature_list[i] = QgsGeometry.asPoint(selected_point[0].geometry())
         return feature_list
 
-    def is_in_layer(self, layer_name: str, attribute_name: str, value_list: list):
+    def is_in_zone(self, layer_name: str, attribute_name: str, value_list: list):
         """確認點號存在且不是0，有一個錯就是全錯，拿不到分數啦"""
         in_layer = True
         point_list = self.get_point(layer_name, attribute_name, value_list)
         for p in point_list:
             in_layer = p != [] and in_layer
         return in_layer
-    
-    def is_road(self, OD_node):
-        is_a_road = False
-        if not is_a_road:
-            self.vlayer['road'].removeSelection()
-            self.vlayer['road'].selectByExpression(
-                '\"A\" = {} and \"B\" = {} and \"DIR1\" != {}'.format(OD_node[0], OD_node[1], 2)
-            )
-            #https://gis.stackexchange.com/questions/332026/getting-position-of-point-in-pyqgis
-            #get the geometry of the feature
-            selected_point = self.vlayer['road'].selectedFeatures()
-            if len(selected_point) > 0:
-                is_a_road = True
 
-        if not is_a_road:
-            self.vlayer['road'].removeSelection()
-            self.vlayer['road'].selectByExpression(
-                '\"A\" = {} and \"B\" = {} and \"DIR1\" != {}'.format(OD_node[1], OD_node[0], 1)
-            )
-            #https://gis.stackexchange.com/questions/332026/getting-position-of-point-in-pyqgis
-            #get the geometry of the feature
-            selected_point = self.vlayer['road'].selectedFeatures()
-            if len(selected_point) > 0:
-                is_a_road = True
-        
-        return is_a_road
-
-    def layer(self, layer_name):
-        if layer_name in self.vlayer:
-            return self.vlayer[layer_name]
-        else:
-            return None
-
-    def display_points(self, nodes_list=None, points_list=None):
+    def display_points(self, nodes_list=None, points_list=None, color: str = 'cyan'):
         """把最短路徑通過的節點選取出來\n
         https://gis.stackexchange.com/questions/86812/how-to-draw-polygons-from-the-python-console
         """
@@ -169,7 +382,7 @@ class SearchGeometry(object):
                 nodes_layer.updateExtents()
             nodes_layer.updateExtents() # update extent of the layer
 
-            nodes_layer.renderer().symbol().setColor(QColor('yellow'))
+            nodes_layer.renderer().symbol().setColor(QColor(color))
             # add the layer to the canvas
             QgsProject.instance().addMapLayers([nodes_layer])
 
@@ -183,13 +396,14 @@ class SearchGeometry(object):
 
         return nodes_layer
 
-class PrepareRoute(object):
+class PrepareRoute():
     """匯入公車路線相關"""
 
-    def choose_route(self, data_dir, zone2dir):
+    @staticmethod
+    def choose_route(data_dir, zone2dir):
         """選擇路線"""
         while True:
-            routeUID, OK = QInputDialog().getText(None, '輸入UID', '請輸入路線UID >w<:')
+            routeUID, OK = QInputDialog().getText(None, '輸入UID', '請輸入路線UID ＞ω＜:')
 
             if OK:
                 #讀取站牌序列的csv
@@ -219,20 +433,27 @@ class PrepareRoute(object):
                     QMessageBox().information(None, '錯誤', '這條路線不在目標區域裡\n不用處理啦~')
                 else:
                     SubRouteName = candidate_route.SubRouteName[candidate_route.Direction == int(direction)].tolist()[0]
-                    route_spec = [routeUID, SubRouteName, direction, route_dir]
+                    route_spec = {
+                        'routeUID': routeUID, 'SubRouteName': SubRouteName, 'direction': direction,
+                        'route_dir': route_dir, 'route_name': '{}_{}_{}'.format(routeUID, SubRouteName, direction)
+                    }
                     break
             else:
-                route_spec = []
+                route_spec = {
+                    'routeUID': None, 'SubRouteName': None, 'direction': None, 
+                    'route_dir': None, 'route_name': None
+                }
                 break
 
         return route_spec, OK
 
-    def init_route_layer(self, route_spec):
+    @staticmethod
+    def init_route_layer(route_spec):
         """初始化route_layer"""
-        route_layer = self.import_csv_to_layer(route_spec) #匯入並建立layer物件
+        route_layer = PrepareRoute.import_csv_to_layer(route_spec) #匯入並建立layer物件
         QgsProject.instance().addMapLayer(route_layer) #把站牌序列圖層加到圖面上
         route_layer.setLabelsEnabled(True) #打開圖層的標籤
-        label = self.set_label('StopSequence') #設定標籤
+        label = PrepareRoute.set_label('StopSequence') #設定標籤
         route_layer.setLabeling(label) #設定圖層的標籤
         route_layer.renderer().symbol().setColor(QColor('red'))
         route_layer.triggerRepaint() #更新圖面
@@ -244,26 +465,34 @@ class PrepareRoute(object):
         canvas.setExtent(extent)
         return route_layer
 
-    def import_csv_to_layer(self, route_spec):
+    @staticmethod
+    def import_csv_to_layer(route_spec):
         """匯入CSV進圖層"""
-        file_name = '{}.csv'.format('_'.join(route_spec[0:3])) #站牌序列檔名生成
-        
         #匯入站牌序列的csv到圖面上
-        url = 'file:///%s?type=csv&detectTypes=yes&xField=%s&yField=%s&crs=EPSG:3824&spatialIndex=no&subsetIndex=no&watchFile=no' % \
-            (urllib.parse.quote(os.path.join(route_spec[3], file_name).replace('\\', '/')), 'PositionLon', 'PositionLat') #設定路徑、X、Y
+        file_dir = urllib.parse.quote(
+            os.path.join(route_spec['route_dir'], '{}.csv'.format(route_spec['route_name'])
+        ).replace('\\', '/'))
+        
+        uri = (
+            'file:///{dir}?type=csv&detectTypes=yes&xField={x}&yField={y}'
+            '&crs=EPSG:3824&spatialIndex=no&subsetIndex=no&watchFile=no'.format(
+                dir=file_dir, x='PositionLon', y='PositionLat'
+            )
+        ) #設定路徑、X、Y
         
         #參考https://gis.stackexchange.com/questions/358682/using-the-labeling-engine-api-vs-the-simple-labeling-interface-api-in-qgis-3
-        route_layer = QgsVectorLayer(url, '{}_{}'.format(route_spec[0], route_spec[2]), 'delimitedtext') #建立layer物件
+        route_layer = QgsVectorLayer(uri, route_spec['route_name'], 'delimitedtext') #建立layer物件
         return route_layer
 
-    def set_label(self, field_name):
+    @staticmethod
+    def set_label(field_name):
         """設定標籤樣式\n
         參考https://gis.stackexchange.com/questions/358682/using-the-labeling-engine-api-vs-the-simple-labeling-interface-api-in-qgis-3
         """
         label = QgsPalLayerSettings() #建立標籤設定物件
         label.fieldName = field_name #指定作為標籤的欄位
         label_txt_format = QgsTextFormat() #建立字型設定的欄位
-        label_txt_format.setFont(QFont('華康中圓體')) #設定字型
+        label_txt_format.setFont(QFont('華康新特黑體')) #設定字型
         label_txt_format.setSize(18) #設定大小
         label.setFormat(label_txt_format) #設定標籤設定裡的字型設定
         label = QgsVectorLayerSimpleLabeling(label) #用"label"設定SimpleLabeling(QGIS其中一種標籤形式)
@@ -272,39 +501,35 @@ class PrepareRoute(object):
 class ProcessUID2node(object):
     """處理UID與點號對應相關"""
 
-    def __init__(
-        self, route_spec: List[str], 
-        GeometryFinder: SearchGeometry, StopUID2node_path: str, route_UID2node_dir: str, io_node_path: str
-    ):
+    def __init__(self, route_spec: List[str], GeometryFinder: SearchGeometry, StopUID2node_path: str, route_UID2node_dir: str, io_node_path: str):
         self.dialog = QInputDialog()
         self.dialog.setGeometry(100, 100, 0, 0)
         self.msgbox = QMessageBox()
         self.msgbox.setGeometry(100, 100, 0, 0)
         self.route_spec = route_spec
-        self.read_seq_to_UID()
+        self.route_UID2node_dir = route_UID2node_dir
+
+        self.seq2UID_fullpath = os.path.join(self.route_spec['route_dir'], '{}.csv'.format(self.route_spec['route_name']))
+        self.UID2node_fullpath = os.path.join(self.route_UID2node_dir, '{}.csv'.format(self.route_spec['route_name']))
+
+        #讀取站序與UID的對應
+        self.seq_to_UID = pd.read_csv(os.path.join(self.route_spec['route_dir'], '{}.csv'.format(self.route_spec['route_name'])))
 
         self.StopUID2node = pd.read_csv(StopUID2node_path)
         self.StopUID2node.set_index('InputID', inplace=True)
 
-        self.io_node = pd.read_csv(io_node_path)
+        self.io_node = pd.read_csv(io_node_path, encoding='big5')
         self.io_node.set_index('point', inplace=True)
 
-        self.read_route(route_UID2node_dir)
+        self.read_route()
 
         self.GeometryFinder = GeometryFinder
 
-    def read_seq_to_UID(self):
-        """讀取站序與UID的對應"""
-        self.seq_to_UID = pd.read_csv(
-            os.path.join(self.route_spec[3], '{}.csv'.format('_'.join(self.route_spec[0:3])))
-        )
-
-    def read_route(self, file_dir: str):
+    def read_route(self):
         """讀取UID到點號的對應"""
-        route_chart_path = os.path.join(file_dir, '{}.csv'.format('_'.join(self.route_spec[0:3])))
-        self.saved_exist = os.path.isfile(route_chart_path)
+        self.saved_exist = os.path.isfile(self.UID2node_fullpath)
         if self.saved_exist:
-            self.route_UID2node = pd.read_csv(route_chart_path)
+            self.route_UID2node = pd.read_csv(self.UID2node_fullpath)
         else:
             self.route_UID2node = []
         
@@ -330,9 +555,7 @@ class ProcessUID2node(object):
                         this_seq = self.seq_to_UID.loc[seq_index, 'StopSequence']
                         self.display_point('route', 'StopSequence', this_seq, current_scale)
                         self.get_newID(seq_index, current_scale)
-                        seq_index = unconfirmed_stops[
-                            (unconfirmed_stops.index(seq_index) + 1) % len(unconfirmed_stops)
-                        ]
+                        seq_index = unconfirmed_stops[(unconfirmed_stops.index(seq_index) + 1) % len(unconfirmed_stops)]
                     else:
                         second_check = QMessageBox().information(
                             None, '再次確認', '要結束修正點號嗎？', 
@@ -340,6 +563,9 @@ class ProcessUID2node(object):
                         )
                         if second_check == QMessageBox.Yes:
                             break
+            
+            #回存該路線修正後的UID與點號對應
+            self.route_UID2node.to_csv(self.UID2node_fullpath, index=False)
 
     def ask_use_saved(self):
         """詢問是否使用既有成果"""
@@ -351,16 +577,6 @@ class ProcessUID2node(object):
                 buttons=QMessageBox.Yes|QMessageBox.No)
             if answer == QMessageBox.Yes:
                 self.use_saved = True
-
-    def save_modified_route(self, file_dir: str):
-        """回存該路線修正後的UID與點號對應"""
-        if not self.saved_exist or not self.use_saved:
-            self.route_UID2node.to_csv(
-                os.path.join(
-                    file_dir, '{}.csv'.format('_'.join(self.route_spec[0:3]))
-                ),
-                index=False
-            )
 
     def choose_stop(self, seq_index, io_zone: List[bool]):
         """選擇站牌"""
@@ -460,7 +676,7 @@ class ProcessUID2node(object):
             )
             if OK:
                 chosen_node = node_list[point_list.index(point_str.split(' ')[0])]
-                path_layer = self.GeometryFinder.display_points(nodes_list=[chosen_node])
+                path_layer = self.GeometryFinder.display_points(nodes_list=[chosen_node], color='cyan')
                 iface.mapCanvas().zoomScale(25000)
                 iface.mapCanvas().refresh()
                 option = self.msgbox.information(
@@ -506,10 +722,7 @@ class ProcessUID2node(object):
                 self.dialog, '新的ID', 
                 '{} ({}): {} ({}/{})\n'
                 '請輸入新的ID\n'
-                '按取消來更改比例尺'.format(
-                    this_seq, this_UID, old_ID,
-                    seq_index + 1, self.seq_to_UID.shape[0]
-                ), 
+                '按取消來更改比例尺'.format(this_seq, this_UID, old_ID, seq_index + 1, self.seq_to_UID.shape[0]), 
                 value=old_ID
             )
             if OK:
@@ -531,9 +744,7 @@ class ProcessUID2node(object):
     
     def stop_to_node_distance(self, stop: int, node: int):
         """算站牌到節點的距離"""
-        stop_point = self.GeometryFinder.get_point(
-            'route', 'StopSequence', [self.seq_to_UID.loc[stop, 'StopSequence']]
-        )[0]
+        stop_point = self.GeometryFinder.get_point('route', 'StopSequence', [self.seq_to_UID.loc[stop, 'StopSequence']])[0]
         node_point = self.GeometryFinder.get_point('node', 'N', [node])[0]
         distance = self.GeometryFinder.distance(point_pair=[stop_point, node_point])
         return distance
@@ -543,8 +754,9 @@ class ProcessUID2node(object):
         while True:
             iface.mapCanvas().zoomScale(current_scale)
             iface.mapCanvas().refresh()
-            new_scale, scale_change_OK = self.dialog.getInt(self.dialog, '更改比例尺', \
-                '輸入新的比例尺', value=current_scale)
+            new_scale, scale_change_OK = self.dialog.getInt(
+                self.dialog, '更改比例尺','輸入新的比例尺', value=current_scale
+            )
             if scale_change_OK:
                 if new_scale > 0:
                     if new_scale != current_scale:
@@ -552,7 +764,7 @@ class ProcessUID2node(object):
                     else:
                         if_quit = self.msgbox.information(
                             self.msgbox, '是否跳出', 
-                            '輸入相同比例尺，要結束更改比例尺嗎？', \
+                            '輸入相同比例尺，要結束更改比例尺嗎？',
                             buttons=QMessageBox.Yes|QMessageBox.No
                         )
                         if if_quit == QMessageBox.Yes:
@@ -560,48 +772,25 @@ class ProcessUID2node(object):
                 else:
                     self.dialog.information(self.dialog, '錯誤', '請輸入正整數')
             else:
-                if_quit = self.msgbox.information(self.msgbox, '再次確認', '要結束更改比例尺嗎？', \
-                    buttons=QMessageBox.Ok|QMessageBox.Cancel)
+                if_quit = self.msgbox.information(
+                    self.msgbox, '再次確認', '要結束更改比例尺嗎？',
+                    buttons=QMessageBox.Ok|QMessageBox.Cancel
+                )
                 if if_quit == QMessageBox.Ok:
                     break
-
-    def get_node_list(self):
-        return self.route_UID2node['TargetID'].tolist()
-
-class FindPathUtils(object):
-    """找最短路徑會用到的瑣碎函式"""
-
-    def load_shapefile(self, shp_path, layer_name):
-        """加入SHP檔案到圖面上，現在沒人用"""
-        vlayer = QgsVectorLayer(shp_path, layer_name, "ogr")
-        if not vlayer.isValid():
-            print(layer_name + ' failed to load!')
-        else:
-            print('success to load ' + layer_name)
-            QgsProject.instance().addMapLayers([vlayer])
-        return vlayer
-
-    def pairwise(self, iterable):
-        """參考https://stackoverflow.com/questions/5764782/iterate-through-pairs-of-items-in-a-python-list?lq=1\n
-        s -> (s0, s1), (s1, s2), (s2, s3), ..."""
-        a, b = tee(iterable)
-        next(b, None)
-        return zip(a, b)
 
 class FindPath(object):
     """生成最短路徑的相關函式"""
 
-    def __init__(self, GeometryFinder: SearchGeometry):
+    def __init__(self, GeometryFinder: SearchGeometry, SPathFinder: ShortestPath):
         self.dialog = QInputDialog()
         self.dialog.setGeometry(100, 100, 0, 0)
         self.msgbox = QMessageBox()
         self.msgbox.setGeometry(100, 100, 0, 0)
         self.GeometryFinder = GeometryFinder
+        self.SPathFinder = SPathFinder
         self.max_accepted_dist, _ = QInputDialog().getInt(
-            None, '想請教一下',
-            '請輸入不分段計算最短路徑的\n'
-            '最大站間直線距離(km)',
-            value=5
+            None, '想請教一下', '請輸入不分段計算最短路徑的\n' '最大站間直線距離(km)', value=5
         )
 
     def set_path_midpoint(self, stop_nodes: List[int], bypass_limit: bool):
@@ -614,7 +803,7 @@ class FindPath(object):
         if bypass_limit or OD_dist > self.max_accepted_dist * 1000:
             while True:
                 path_layer = self.GeometryFinder.display_points(
-                    nodes_list=path_passed_nodes[current_start_id-1:current_start_id+1]
+                    nodes_list=path_passed_nodes[current_start_id-1:current_start_id+1], color='cyan'
                 )
                 if OD_dist > self.max_accepted_dist * 1000:
                     msgbox_title = '距離太大了'
@@ -624,11 +813,8 @@ class FindPath(object):
                     msgbox_compare = '小於'
                 Option = self.msgbox.information(
                     self.msgbox, msgbox_title, 
-                    '站間距離為 {:.3f}公里\n'
-                    '「{}」你設定的 {}公里\n'
-                    '要手動輸入中間點嗎？'.format(
-                        OD_dist / 1000, msgbox_compare, self.max_accepted_dist
-                    ), 
+                    '站間距離為 {:.3f}公里，「{}」你設定的 {}公里\n'
+                    '要手動輸入中間點嗎？'.format(OD_dist / 1000, msgbox_compare, self.max_accepted_dist), 
                     buttons=QMessageBox.Yes|QMessageBox.No
                 )
                 if Option == QMessageBox.No:
@@ -639,32 +825,23 @@ class FindPath(object):
                     new_midpoint, OK = self.dialog.getInt(
                         self.dialog, '手動輸入站間經過點',
                         '請輸入中間點的點號(N)\n'
-                        'Ok: 確認，Cancel: 刪除上一個輸入結果或跳出\n'
-                        '請開另外一個QGIS來找點號\n'
                         '(插入點前的點: {}\n'
                         ' 插入點後的點: {})'.format(
                             ', '.join(map(str, path_passed_nodes[:current_start_id])),
                             ', '.join(map(str, path_passed_nodes[current_start_id:]))
-                        )
+                        ),
                     )
                     if OK:
-                        if self.GeometryFinder.is_in_layer('node', 'N', [new_midpoint]):
+                        if self.GeometryFinder.is_in_zone('node', 'N', [new_midpoint]):
                             new_points = self.GeometryFinder.get_point(
-                                'node', 'N', 
-                                [path_passed_nodes[current_start_id-1], new_midpoint]
+                                'node', 'N', [path_passed_nodes[current_start_id-1], new_midpoint]
                             )
                             new_dist = self.GeometryFinder.distance(point_pair=new_points)
-                            new_path_layer = self.GeometryFinder.display_points(
-                                points_list=new_points
-                            )
+                            new_path_layer = self.GeometryFinder.display_points(points_list=new_points, color='cyan')
                             choice = self.msgbox.information(
                                 self.msgbox, '確認',
                                 '輸入的點({})跟上一點({})距離約 {:.2f} km\n'
-                                '確定是這個點嗎？'.format(
-                                    new_midpoint, 
-                                    path_passed_nodes[current_start_id-1],
-                                    new_dist / 1000
-                                ),
+                                '確定是這個點嗎？'.format(new_midpoint, path_passed_nodes[current_start_id-1], new_dist / 1000),
                                 buttons=QMessageBox.Yes|QMessageBox.No
                             )
                             
@@ -676,341 +853,104 @@ class FindPath(object):
                                 QgsProject.instance().removeMapLayer(path_layer)
                                 path_passed_nodes.insert(current_start_id, new_midpoint)
                                 current_start_id += 1
-                                OD_dist = self.GeometryFinder.distance(
-                                    node_pair=path_passed_nodes[current_start_id-1:current_start_id+1]
-                                )
+                                OD_dist = self.GeometryFinder.distance(node_pair=path_passed_nodes[current_start_id-1:current_start_id+1])
                                 break
                         else:
-                            self.msgbox.information(
-                                self.msgbox, '錯誤',
-                                '輸入的點({})不在地圖裡'.format(new_midpoint)
-                            )
+                            self.msgbox.information(self.msgbox, '錯誤', '輸入的點({})不在地圖裡'.format(new_midpoint))
                             continue
                     else:
                         if current_start_id > 1:
                             choice = self.msgbox.information(
                                 self.msgbox, '疑問',
-                                '是否刪除上一個中間點({})？'.format(
-                                    path_passed_nodes[current_start_id-1]
-                                ),
+                                '是否刪除上一個中間點({})？'.format(path_passed_nodes[current_start_id-1]),
                                 buttons=QMessageBox.Yes|QMessageBox.No
                             )
                             if choice == QMessageBox.Yes:
-                                path_passed_nodes.pop(current_start_id-1)
+                                path_passed_nodes.pop(current_start_id - 1)
                                 current_start_id -= 1
                                 break
                         
-                        choice = self.msgbox.information(
-                            self.msgbox, '疑問',
-                            '是否結束編輯？'.format(
-                                path_passed_nodes[current_start_id-1]
-                            ),
-                            buttons=QMessageBox.Yes|QMessageBox.No
-                        )
+                        choice = self.msgbox.information(self.msgbox, '疑問', '是否結束編輯？', buttons=QMessageBox.Yes|QMessageBox.No)
                         if choice == QMessageBox.Yes:
-                            path_passed_nodes.pop(current_start_id-1)
-                            current_start_id -= 1
                             break
 
-        return path_passed_nodes
+        # set the start and the end of each subpath
+        return list(zip(path_passed_nodes, path_passed_nodes[1:]))
 
-    def find_path(self, OD_node: list):
+    def find_path(self, find_path_todo: list):
         """給定起終點，回傳路徑"""
-        OD_node = [int(n) for n in OD_node]
-        #如果就是一個路段，直接回傳
-        if self.GeometryFinder.is_road(OD_node):
-            return OD_node, True
-        
-        passed_node_list = []
-        good_result = True
-        OD_point = self.GeometryFinder.get_point('node', 'N', OD_node)
-        #框出路網的框框
-        frame_layer = self.draw_frame(
-            OD_point
-        )
-        #裁切路網
-        clp_rd_lyr, good_result = self.clip_road(
-            frame_layer, good_result
-        )
-        #尋找最短路徑
-        shortest_path_lyr, good_result = self.shortest_path(
-            OD_point, clp_rd_lyr, good_result
-        )
-        #取交集
-        intrsctn_lyr, good_result = self.intersection(
-            clp_rd_lyr, shortest_path_lyr, good_result
-        ) 
-        #取得路徑序列
-        passed_node_list, good_result = self.find_passed_nodes(
-            intrsctn_lyr, OD_node, good_result
-        ) 
-        
-        #刪除臨時產生的圖層
-        QgsProject.instance().removeMapLayer(frame_layer)
-        if clp_rd_lyr != []:
-            QgsProject.instance().removeMapLayer(clp_rd_lyr)
-        if shortest_path_lyr != []:
-            QgsProject.instance().removeMapLayer(shortest_path_lyr)
-        if intrsctn_lyr != []:
-            QgsProject.instance().removeMapLayer(intrsctn_lyr)
+        all_path_list = []
+        for OD_str in find_path_todo:
+            OD_node = list(map(int, OD_str))
+            passed_node_list, _ = self.SPathFinder.find_shortest_path(OD_node)
+            if len(passed_node_list) == 0:
+                return [], False
+            
+            all_path_list.append(passed_node_list)
+            
+        path_list = [find_path_todo[0][0]]
+        for sp in all_path_list:
+            for node in sp[1:]:
+                path_list.append(node)
 
-        return passed_node_list, good_result
-
-    def draw_frame(self, OD_point: list):
-        """框出路網的框框\n
-        https://gis.stackexchange.com/questions/86812/how-to-draw-polygons-from-the-python-console
-        """
-        frame_layer = QgsVectorLayer('Polygon', 'frame' , "memory")
-        pr = frame_layer.dataProvider() 
-        poly = QgsFeature()
-        points = self.set_boundary(OD_point) #設定框框
-        poly.setGeometry(QgsGeometry.fromPolygonXY([points]))
-        pr.addFeatures([poly])
-        frame_layer.updateExtents()
-        QgsProject.instance().addMapLayers([frame_layer])
-        
-        #zoom to frame
-        canvas = iface.mapCanvas()
-        extent = frame_layer.extent()
-        canvas.setExtent(extent)
-
-        return frame_layer
-
-    def set_boundary(self, OD_point: list):
-        """設定框框邊界"""
-        canvas_dist = QgsDistanceArea().measureLine(OD_point[0], OD_point[1])
-        x_min = min(OD_point[0].x(), OD_point[1].x()) - min(0.01, canvas_dist)
-        x_max = max(OD_point[0].x(), OD_point[1].x()) + min(0.01, canvas_dist)
-        y_min = min(OD_point[0].y(), OD_point[1].y()) - min(0.01, canvas_dist)
-        y_max = max(OD_point[0].y(), OD_point[1].y()) + min(0.01, canvas_dist)
-        return [
-            QgsPointXY(x_min, y_min), QgsPointXY(x_min, y_max), 
-            QgsPointXY(x_max, y_max), QgsPointXY(x_max, y_min)
-        ]
-
-    def clip_road(self, frame_lyr, good_result: bool):
-        """切出路網，降低最短路徑運算量"""
-        clp_rd_lyr = []
-        if good_result:
-            clipping_road_parameters = {
-                'INPUT': self.GeometryFinder.layer('road'),
-                'OVERLAY': frame_lyr,
-                'OUTPUT': 'memory:'
-            }
-            try:
-                output = processing.run("native:clip", clipping_road_parameters)
-                clp_rd_lyr = output['OUTPUT']
-            except:
-                QMessageBox().information(None, '失敗', '切路網失敗\n按OK繼續下一條')
-                good_result = False
-                
-        return clp_rd_lyr, good_result
-
-    def shortest_path(self, OD_point, clp_rd_lyr, good_result: bool):
-        """尋找最短路徑"""
-        shortest_path_lyr = []
-        if good_result:
-            shortest_path_parameters = {
-                'DEFAULT_DIRECTION' : 2, 
-                'DEFAULT_SPEED' : 40, 
-                'DIRECTION_FIELD' : 'DIR1', 
-                'START_POINT' : '{},{} [EPSG:4326]'.format(OD_point[0].x(), OD_point[0].y()),
-                'END_POINT' : '{},{} [EPSG:4326]'.format(OD_point[1].x(), OD_point[1].y()), 
-                'INPUT' : clp_rd_lyr, 
-                'OUTPUT' : 'memory:', 
-                'SPEED_FIELD' : 'SPEED', 
-                'STRATEGY' : 0, 
-                'TOLERANCE' : 0, 
-                'VALUE_BACKWARD' : '2', 
-                'VALUE_BOTH' : '0', 
-                'VALUE_FORWARD' : '1'
-                }
-            try:
-                output = processing.run("native:shortestpathpointtopoint", shortest_path_parameters)
-                shortest_path_lyr = output['OUTPUT']
-            except:
-                QMessageBox().information(None, '失敗', '沒找到路徑\n按OK繼續下一條')
-                good_result = False
-                
-        return shortest_path_lyr, good_result
-
-    def intersection(self, clp_rd_lyr, shortest_path_lyr, good_result: bool):
-        """透過交集對照到現實的路網節線"""
-        intrsct_lyr = []
-        if good_result:
-            intersection_parameters = {
-                'INPUT': clp_rd_lyr,
-                'OVERLAY': shortest_path_lyr, 
-                'INPUT_FIELDS': [], 
-                'OVERLAY_FIELDS': [], 
-                'OVERLAY_FIELDS_PREFIX': '', 
-                'OUTPUT': 'memory:'
-            }
-            try:
-                output = processing.run("native:intersection", intersection_parameters)
-                intrsct_lyr = output['OUTPUT']
-            except:
-                QMessageBox().information(None, '失敗', '找到路徑，但找不到對應的節線\n按OK繼續下一條')
-                good_result = False
-                
-        return intrsct_lyr, good_result
-
-    def find_passed_nodes(self, intersection_layer, OD_node: List[int], result_OK: bool):
-        """尋找通過的路網點"""
-        if result_OK:
-            #獲取節線列表
-            intersection_features = intersection_layer.getFeatures()
-            link_dict = {}
-            for i in intersection_features:
-                if i.attributes()[3] not in link_dict:
-                    link_dict[i.attributes()[3]] = []
-                if i.attributes()[4] not in link_dict:
-                    link_dict[i.attributes()[4]] = []
-                if i.attributes()[27] != 2: #如果不是反向節線(DIR==2)，就把順向節線加入
-                    link_dict[i.attributes()[3]].append(i.attributes()[4])
-                if i.attributes()[27] != 1:
-                    link_dict[i.attributes()[4]].append(i.attributes()[3])
-
-            #串接節線
-            passed_node = [OD_node[0]]
-            while passed_node[-1] != OD_node[1] and result_OK:
-                not_found = True
-                candidate_node = link_dict[passed_node[-1]]
-                for n in candidate_node:
-                    if n not in passed_node:
-                        not_found = False
-                        passed_node.append(n)
-                        break
-                if not_found:
-                    result_OK = False
-        
-            if not result_OK:
-                QMessageBox().information(None, '錯誤', '在找點序時，程式迷路了')
-                passed_node = [OD_node[0], 0, OD_node[1]] #用0表示錯誤
-        
-        else:
-            passed_node = [OD_node[0], 0, OD_node[1]] #用0表示錯誤
-        
-        return passed_node, result_OK
+        return path_list, True
 
 class ProcessResult(object):
     """確認結果與修改錯誤"""
-    def manually_input(self, stop_node: List[int], passed_node_list: List[int], init_path_dir, frthr_inspct_dir, checked_path_dir):
+    @staticmethod
+    def manually_input(stop_node: List[int], passed_node_list: List[int], output_dir, path_filename):
         """手動輸入最短路徑"""
         further_check = False
         check_path_dialog = QInputDialog()
         check_path_dialog.setGeometry(100, 100, 0, 0)
-        confirm_dialog = QMessageBox()
-        confirm_dialog.setGeometry(100, 100, 0, 0)
+        
         while True:
             passed_node_str, result_OK = check_path_dialog.getText(
-                check_path_dialog, 
-                '手動輸入', 
+                check_path_dialog, '手動輸入', 
                 '{} -> {}\n'
                 '輸入站間路徑\n'
                 '請都以正數輸入，程式會自己轉換\n'
                 '真的有區間找不出來就填0，之後再校正\n'
-                '需要之後再校正就按取消'.format(stop_node[0], stop_node[1]), \
-                text=','.join(map(str, passed_node_list))
-                )
-            if result_OK:
-                passed_node_list = list(map(int, passed_node_str.split(',')))
-                if 0 in passed_node_list:
-                    second_check = confirm_dialog.information(
-                        confirm_dialog, '再次確認', '要將路徑移至待檢查區嗎？', \
-                        buttons=QMessageBox.Yes|QMessageBox.No)
-                    if second_check == QMessageBox.Yes:
-                        ProcessPath().save(passed_node_list, frthr_inspct_dir)
-                        further_check = True
-                        break
-                else:
-                    second_check = confirm_dialog.information(
-                        confirm_dialog, '再次確認', '確定是正確結果並結束修正本路徑嗎？', \
-                        buttons=QMessageBox.Yes|QMessageBox.No)
-                    if second_check == QMessageBox.Yes:
-                        ProcessPath().save(passed_node_list, checked_path_dir)
-                        break
+                '需要之後再校正就按取消'.format(stop_node[0], stop_node[1]), text=','.join(map(str, passed_node_list))
+            )
+            if result_OK and (0 not in list(map(int, passed_node_str.split(',')))):
+                if ProcessResult.second_check('確定是正確結果並結束修正本路徑嗎？', passed_node_list, output_dir['checked_path'], path_filename):
+                    passed_node_list = list(map(int, passed_node_str.split(',')))
+                    break
             else:
-                second_check = confirm_dialog.information(
-                    confirm_dialog, '再次確認', '要將路徑移至待檢查區嗎？', \
-                    buttons=QMessageBox.Yes|QMessageBox.No)
-                if second_check == QMessageBox.Yes:
-                    ProcessPath().save(passed_node_list, frthr_inspct_dir)
+                if ProcessResult.second_check('要將路徑移至待檢查區嗎？', passed_node_list, output_dir['frthr_inspct'], path_filename):
                     further_check = True
                     break
             
         return passed_node_list, further_check
 
-class LatLonToTWD97(object):
-    """This object provide method for converting lat/lon coordinate to TWD97
-    coordinate
-
-    the formula reference to
-    http://www.uwgb.edu/dutchs/UsefulData/UTMFormulas.htm (there is lots of typo)
-    http://www.offshorediver.com/software/utm/Converting UTM to Latitude and Longitude.doc
-
-    Parameters reference to
-    http://rskl.geog.ntu.edu.tw/team/gis/doc/ArcGIS/WGS84%20and%20TM2.htm
-    http://blog.minstrel.idv.tw/2004/06/taiwan-datum-parameter.html
-    """
-
-    def __init__(self, a = 6378137.0, b = 6356752.314245,
-        long0 = radians(121), k0 = 0.9999, dx = 250000,):
-        self.a = a # Equatorial radius
-        self.b = b # Polar radius
-        self.long0 = long0 # central meridian of zone
-        self.k0 = k0 # scale along long0
-        self.dx = dx # delta x in meter
-
-    def convert(self, lat, lon):
-        """Convert lat lon to twd97"""
-        a = self.a
-        b = self.b
-        long0 = self.long0
-        k0 = self.k0
-        dx = self.dx
-
-        e = (1 - b ** 2 / a ** 2) ** 0.5
-        e2 = e ** 2 / (1 - e ** 2)
-        n = (a - b) / (a + b)
-        nu = a / (1 - (e ** 2) * (sin(lat) ** 2)) ** 0.5
-        p = lon - long0
-
-        A = a * (1 - n + (5 / 4.0) * (n ** 2 - n ** 3) + (81 / 64.0)*(n ** 4  - n ** 5))
-        B = (3 * a * n / 2.0) * (1 - n + (7 / 8.0) * (n ** 2 - n ** 3) + (55 / 64.0) * (n ** 4 - n ** 5))
-        C = (15 * a * (n ** 2) / 16.0) * (1 - n + (3 / 4.0) * (n ** 2 - n ** 3))
-        D = (35 * a * (n ** 3) / 48.0) * (1 - n + (11 / 16.0) * (n ** 2 - n ** 3))
-        E = (315 * a * (n ** 4) / 51.0) * (1 - n)
-
-        S = A * lat - B * sin(2 * lat) + C * sin(4 * lat) - D * sin(6 * lat) + E * sin(8 * lat)
-
-        K1 = S * k0
-        K2 = k0 * nu * sin(2 * lat)/4.0
-        K3 = (k0 * nu * sin(lat) * (cos(lat) ** 3) / 24.0) * \
-            (5 - tan(lat) ** 2 + 9 * e2 * (cos(lat) ** 2) + 4 * (e2 ** 2) * (cos(lat) ** 4))
-
-        y = K1 + K2 * (p ** 2) + K3 * (p ** 4)
-
-        K4 = k0 * nu * cos(lat)
-        K5 = (k0 * nu * (cos(lat) ** 3) / 6.0) * (1 - tan(lat) ** 2 + e2 * (cos(lat) ** 2))
-
-        x = K4 * p + K5 * (p ** 3) + self.dx
-        return x, y
+    @staticmethod
+    def second_check(dialog, node_list, dest_dir, filename):
+        confirm_dialog = QMessageBox()
+        confirm_dialog.setGeometry(100, 100, 0, 0)
+        second_check = confirm_dialog.information(confirm_dialog, '再次確認', dialog, buttons=QMessageBox.Yes|QMessageBox.No)
+        if second_check == QMessageBox.Yes:
+            ProcessPath.save(node_list, dest_dir, filename)
+            return True
+        return False
 
 def main():
+    # 選擇資料夾
+    D_drive = 'D:/Users/63707/Documents/python3/bus_route/'
     P_drive = 'P:/09091-中臺區域模式/Working/'
-    data_dir = os.path.join(P_drive, '04_交通資料/公車站牌/new/')
-    result_dir = os.path.join(P_drive, '04_交通資料/公車站牌/new/')
 
-    route_UID2node_dir = os.path.join(data_dir, '00_route_UID2node')
+    data_dir = os.path.join(D_drive, 'find_path_test')
+
     UID2node_path = os.path.join(data_dir, 'C_TWN_bus_stop_distance_matrix.csv')
     io_node_path = os.path.join(data_dir, '進出區域點號.csv')
 
-    init_path_dir = os.path.join(result_dir, '01_initial_path_result')
-    frthr_inspct_dir = os.path.join(result_dir, '02_further_inspect')
-    checked_path_dir = os.path.join(result_dir, '03_checked_path')
-    outbnd_path_dir = os.path.join(result_dir, '04_path_with_outbound_stops')
-    result_route_dir = os.path.join(result_dir, '05_final_result_route')
+    output_dir = {
+        'route_UID2node': os.path.join(data_dir, '00_route_UID2node'),
+        'init_path': os.path.join(data_dir, '01_initial_path_result'),
+        'frthr_inspct': os.path.join(data_dir, '02_further_inspect'),
+        'checked_path': os.path.join(data_dir, '03_checked_path'),
+        'result_route': os.path.join(data_dir, '05_final_result_route'),
+    }
 
     zone2dir = {
         'MIA': 'City/MiaoliCounty/',
@@ -1020,122 +960,121 @@ def main():
         'YUN': 'City/YunlinCounty/',
         'THB': 'InterCity'
     }
-    vlayer = {}
+    node_csv_path = 'P:/09091-中臺區域模式/Working/98_GIS/road/CSV/C_TWN_NET_node.csv'
+    road_csv_path = 'P:/09091-中臺區域模式/Working/98_GIS/road/CSV/C_TWN_NET_link.csv'
+
+    excluded_roadtype = ['RR', 'ZL', 'WL', 'TL']
+    node_dict = ImportNetwork.get_node_list(node_csv_path, min_N=5001, max_N=150000)
+    road_dict = ImportNetwork.get_road_list(road_csv_path, excluded_roadtype)
+    road_tree = ImportNetwork.generate_tree(node_dict, road_dict)
+
+    shortest_path_finder = ShortestPath(node_dict, road_dict, road_tree)
 
     #選取圖層: 因為有可能有同名圖層，會回傳list回來，所以要挑第一個
+    vlayer = {}
     vlayer['road'] = QgsProject.instance().mapLayersByName('C_TWN_ROAD_picked')[0]
     vlayer['node'] = QgsProject.instance().mapLayersByName('C_TWN_ROAD_picked_node')[0]
     
+    ptx_data_dir = os.path.join(D_drive, 'PTX_data/CSV_20210407/Bus')
 
     while True:
-        route_spec, OK = PrepareRoute().choose_route(data_dir, zone2dir)
+        route_spec, OK = PrepareRoute.choose_route(ptx_data_dir, zone2dir)
 
         if OK:
-            vlayer['route'] = PrepareRoute().init_route_layer(route_spec) #建立並顯示route_layer
+            vlayer['route'] = PrepareRoute.init_route_layer(route_spec) #建立並顯示route_layer
             iface.mapCanvas().freeze(False) #讓圖面可以隨時更新
-            GeometryFinder = SearchGeometry(vlayer)
+            geometry_finder = SearchGeometry(vlayer)
 
             #####讀取站牌最近節點的屬性資料
-            RouteStopMapping = ProcessUID2node(
-                route_spec, GeometryFinder, UID2node_path, route_UID2node_dir, io_node_path
-            )
-            RouteStopMapping.modify()
-            RouteStopMapping.save_modified_route(route_UID2node_dir)
+            bus_stop_mapper = ProcessUID2node(route_spec, geometry_finder, UID2node_path, output_dir['route_UID2node'], io_node_path)
+            bus_stop_mapper.modify()
 
-            if_proceed = QMessageBox().information(
-                None, '詢問', '要繼續尋找站間路徑嗎？', 
-                buttons=QMessageBox.Yes|QMessageBox.No
-            )
+            if_proceed = QMessageBox().information(None, '詢問', '要繼續尋找站間路徑嗎？', buttons=QMessageBox.Yes|QMessageBox.No)
             if if_proceed == QMessageBox.No:
                 continue
 
             #####找站間最短路徑
-            PathFinder = FindPath(GeometryFinder)
+            path_finder = FindPath(geometry_finder, shortest_path_finder)
             #(#1, #2), (#2, #3)... 以這樣的順序一組一組把路徑串起來
-            node_list = RouteStopMapping.get_node_list()
+            node_list = list(map(int, bus_stop_mapper.route_UID2node['TargetID'].tolist()))
+            uid_list = bus_stop_mapper.seq_to_UID['StopUID'].tolist()
             stop_pair = list(zip(node_list, node_list[1:]))
-            for s1, s2 in stop_pair:
-                stop_nodes = [int(s1), int(s2)]
-                if GeometryFinder.is_in_layer('node', 'N', stop_nodes): #如果兩站都在區域內才找路徑
-                    if stop_nodes[0] != stop_nodes[1]: #如果頭尾不同站才找路徑
-                        #讀取已儲存的路徑
-                        path_path = os.path.join(
-                            checked_path_dir, '{}_{}.txt'.format(stop_nodes[0], stop_nodes[1])
-                        )
-                        if not os.path.isfile(path_path):
-                            path_list = [stop_nodes[0], 0, stop_nodes[1]]
-                            bypass_limit = False
-                            while True:
-                                # set midpoints
-                                path_passed_nodes = PathFinder.set_path_midpoint(stop_nodes, bypass_limit)
-                                # set the start and the end of each subpath
-                                find_path_todo = list(zip(path_passed_nodes, path_passed_nodes[1:]))
-                                all_path_list = []
-                                for OD_node in find_path_todo:
-                                    subpath_list, result_OK = PathFinder.find_path(OD_node)
-                                    if result_OK:
-                                        all_path_list.append(subpath_list)
-                                    else:
-                                        break
-                                        
-                                if result_OK:
-                                    path_list = [path_passed_nodes[0]]
-                                    for sp in all_path_list:
-                                        for node in sp[1:]:
-                                            path_list.append(node)
-                                    ProcessPath().save(path_list, init_path_dir)
-                                    break
-                                else:
-                                    option = QMessageBox().information(
-                                        None, '錯誤',
-                                        '這樣的起終點與中間點組合找不到站間路徑\n'
-                                        '要重新輸入中間點嗎？', 
-                                        buttons=QMessageBox.Yes|QMessageBox.No
-                                    )
-                                    if option == QMessageBox.No:
-                                        ProcessPath().save(path_list, frthr_inspct_dir)
-                                        break
-                                    else:
-                                        bypass_limit = True
-                                        continue
-                    else:
-                        path_list = [stop_nodes[0]]
-                        ProcessPath().save(path_list, checked_path_dir) #把找到的路徑存起來
-            
-            ######校正結果
-            further_check = False
-            for s1, s2 in stop_pair:
-                stop_nodes = [int(s1), int(s2)]
-                #計算起終點對應的ID
-                if GeometryFinder.is_in_layer('node', 'N', stop_nodes):
-                    if stop_nodes[0] != stop_nodes[1]:
-                        #讀取已確認的路徑
-                        path_path = os.path.join(
-                            checked_path_dir, '{}_{}.txt'.format(stop_nodes[0], stop_nodes[1])
-                        )
-                        if not os.path.isfile(path_path):
-                            #讀取已輸出的路徑
-                            path_list, no_saved_path = ProcessPath().load(stop_nodes, init_path_dir)
-                            if no_saved_path:
-                                path_layer = GeometryFinder.display_points(nodes_list=stop_nodes)
-                                manual_input = QMessageBox().information(
-                                    None, '載入失敗', '未有該區間已輸出路徑\n要手動輸入嗎？',
+            uid_pair = list(zip(uid_list, uid_list[1:]))
+            further_check_i = []
+            for i, stop_nodes in enumerate(stop_pair):
+                stop_uids = uid_pair[i]
+                path_filename = '{}({})_{}({})'.format(stop_nodes[0], stop_uids[0], stop_nodes[1], stop_uids[1])
+                if stop_nodes[0] != stop_nodes[1]: #如果頭尾不同站才找路徑
+                    #讀取已儲存的路徑
+                    path_path = os.path.join(output_dir['checked_path'], '{}.txt'.format(path_filename))
+                    if not os.path.isfile(path_path):
+                        path_list = [stop_nodes[0], 0, stop_nodes[1]]
+                        bypass_limit = False
+                        while True:
+                            # set midpoints
+                            find_path_todo = path_finder.set_path_midpoint(stop_nodes, bypass_limit)
+                            path_list, result_OK = path_finder.find_path(find_path_todo)
+                            
+                            if result_OK:
+                                ProcessPath.save(path_list, output_dir['init_path'], path_filename)
+                                #確認路徑
+                                path_layer = geometry_finder.display_points(nodes_list=path_list, color='cyan')
+                                option = QMessageBox().information(
+                                    None, '疑問', '接受這樣的結果嗎？', 
                                     buttons=QMessageBox.Yes|QMessageBox.No
                                 )
-                                if manual_input == QMessageBox.No:
-                                    ProcessPath().save(path_list, frthr_inspct_dir)
-                                    QgsProject.instance().removeMapLayer(path_layer)
-                                    continue
+                                QgsProject.instance().removeMapLayer(path_layer)
+                                if option == QMessageBox.Yes:
+                                    ProcessPath.save(path_list, output_dir['checked_path'], path_filename)
+                                    break
+                                else:
+                                    option2 = QMessageBox().information(
+                                        None, '疑問', '要設定中間點讓電腦重算嗎？', 
+                                        buttons=QMessageBox.Yes|QMessageBox.No
+                                    )
+                                    if option2 == QMessageBox.Yes:
+                                        bypass_limit = True
+                                        continue
+                                    else:
+                                        further_check_i.append(i)
+                                        break
+
                             else:
-                                path_layer = GeometryFinder.display_points(nodes_list=path_list)
-
-                            path_list, further_check = ProcessResult().manually_input(
-                                stop_nodes, path_list, init_path_dir, frthr_inspct_dir, checked_path_dir
-                            )
-                            QgsProject.instance().removeMapLayer(path_layer)
-
+                                option = QMessageBox().information(
+                                    None, '錯誤',
+                                    '這樣的組合找不到站間路徑\n'
+                                    '要重新輸入中間點嗎？', 
+                                    buttons=QMessageBox.Yes|QMessageBox.No
+                                )
+                                if option == QMessageBox.No:
+                                    ProcessPath.save(path_list, output_dir['frthr_inspct'], path_filename)
+                                    further_check_i.append(i)
+                                    break
+                                else:
+                                    bypass_limit = True
+                                    continue
                 else:
-                    QMessageBox().information(None, '站點對應有問題', '其中一站不在計畫區域')
+                    path_list = [stop_nodes[0]]
+                    ProcessPath.save(path_list, output_dir['checked_path'], path_filename) #把找到的路徑存起來
+        
+            ######校正結果
+            further_check = False
+            for i in further_check_i:
+                stop_nodes = stop_pair[i]
+                stop_uids = uid_pair[i]
+                path_filename = '{}({})_{}({})'.format(stop_nodes[0], stop_uids[0], stop_nodes[1], stop_uids[1])
+                path_layer = geometry_finder.display_points(nodes_list=stop_nodes, color='cyan')
+                manual_input = QMessageBox().information(
+                    None, '載入失敗', '未有該區間已輸出路徑\n要手動輸入嗎？',
+                    buttons=QMessageBox.Yes|QMessageBox.No
+                )
+                if manual_input == QMessageBox.No:
+                    ProcessPath.save(path_list, output_dir['frthr_inspct'], path_filename)
+                    QgsProject.instance().removeMapLayer(path_layer)
+                    continue
+
+                path_list, further_check = ProcessResult.manually_input(stop_nodes, path_list, output_dir, path_filename)
+                QgsProject.instance().removeMapLayer(path_layer)
 
             if not further_check:
                 QMessageBox().information(None, 'OK OK', '完成確認，都沒問題')
@@ -1144,10 +1083,7 @@ def main():
                 QMessageBox().information(None, 'Oh Oh', '完成確認，有要進一步確認的地方')
 
         else:
-            second_check = QMessageBox().information(
-                None, '再次確認', '真的要結束嗎？ ｡ﾟヽ(ﾟ´Д`)ﾉﾟ｡', 
-                buttons=QMessageBox.Yes|QMessageBox.No
-            )
+            second_check = QMessageBox().information(None, '再次確認', '真的要結束嗎？ ｡ﾟヽ(ﾟ´Д`)ﾉﾟ｡', buttons=QMessageBox.Yes|QMessageBox.No)
             if second_check == QMessageBox.Yes:
                 break
 

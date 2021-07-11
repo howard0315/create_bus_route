@@ -8,9 +8,7 @@ from pandas import read_csv
 def save_route(path_list: list, save_dir: str, route_spec: list):
     """把路線的站牌間路徑儲存成文字檔"""
     path_str = ', '.join(map(str, path_list))
-    path_file = open(
-        os.path.join(save_dir, '{}.txt'.format('_'.join(route_spec[0:3]))), 'w'
-    )
+    path_file = open(os.path.join(save_dir, '{}.txt'.format('_'.join(route_spec[0:3]))), 'w')
     path_file.write(path_str)
     path_file.close()
 
@@ -51,12 +49,9 @@ def choose_route(data_dir, zone2dir):
             candidate = route_list[route_list.SubRouteUID == routeUID]
             
             if candidate.shape[0] == 2:
-                direction = input(
-                    '請輸入路線方向[{}]: '.format(
-                        ', '.join(map(str, candidate.Direction.tolist()))
-                    )
-                )
-                if direction not in map(str, candidate.Direction.tolist()):
+                dir_candidate = map(str, candidate.Direction.tolist())
+                direction = input('請輸入路線方向[{}]: '.format(', '.join(dir_candidate)))
+                if direction not in dir_candidate:
                     print('方向輸入錯誤')
                     continue
             elif candidate.shape[0] == 1:
@@ -66,7 +61,7 @@ def choose_route(data_dir, zone2dir):
                 continue
 
             if candidate.if_pass_zone[candidate.Direction == int(direction)].tolist()[0] == 0:
-                print('錯誤: 這條路線未經計畫區域')
+                print('錯誤: 路線未經計畫區域')
             else:
                 SubRouteName = candidate.SubRouteName[candidate.Direction == int(direction)].tolist()[0]
                 route_spec = [routeUID, SubRouteName, direction, route_dir]
@@ -99,14 +94,34 @@ def append_path(bus_route, section_result):
         bus_route.append(section_result[-1])
     return bus_route
 
+def combine_section(node_list, checked_path_dir):
+    """合併路線"""
+    final_bus_route = [] #最終輸出這個
+    no_failed_section = True
+    num_path = len(node_list) - 1
+    for i, OD_node in enumerate(zip(node_list, node_list[1:])):
+        #計算起終點對應的ID
+        if OD_node[0] != OD_node[1]:
+            if OD_node[0] != 0 and OD_node[1] != 0:
+                #讀取已確認的路徑
+                path_list, no_checked_path = load_path(OD_node, checked_path_dir)
+                if no_checked_path:
+                    print('\n失敗: [{} -> {}] 未確認'.format(OD_node[0], OD_node[1]))
+                    no_failed_section = False
+            else:
+                print('\n失敗: [{} -> {}] 有一為0'.format(OD_node[0], OD_node[1]))
+                no_failed_section = False
+
+            if no_failed_section:
+                #接上已經找到的路，沒停靠的通過節點在這邊才加負數
+                progress_bar(i + 1, num_path)
+                final_bus_route = append_path(final_bus_route, path_list)
+    
+    return final_bus_route, no_failed_section
+
 def progress_bar(current_num: int, total_num: int):
     """ Display the progress bar if the result is printed to the text file. """
-    print(
-        '\r[{:<50}] ({}/{})'.format(
-            '=' * int(current_num / (2 * total_num) * 100), current_num, total_num
-        ), 
-        end=''
-    )
+    print('\r[{:<50}] ({}/{})'.format('=' * int(current_num / (2 * total_num) * 100), current_num, total_num), end='')
 
 def main():
     P_drive = 'P:/09091-中臺區域模式/Working/'
@@ -128,35 +143,12 @@ def main():
 
     while True:
         route_spec, OK = choose_route(data_dir, zone2dir)
-
         if OK:
             node_list = read_node_list(route_UID2node_dir, route_spec)
-            
             if len(node_list) == 0:
                 print('掰噗: 這條路線還沒處理過喔，請下次再來')
-
             else:
-                final_bus_route = [] #最終輸出這個
-                no_failed_section = True
-                num_path = len(node_list) - 1
-                for i, OD_node in enumerate(zip(node_list, node_list[1:])):
-                    #計算起終點對應的ID
-                    if OD_node[0] != OD_node[1]:
-                        if OD_node[0] != 0 and OD_node[1] != 0:
-                            #讀取已確認的路徑
-                            path_list, no_checked_path = load_path(OD_node, checked_path_dir)
-                            if no_checked_path:
-                                print('\n失敗: [{} -> {}] 未確認'.format(OD_node[0], OD_node[1]))
-                                no_failed_section = False
-                        else:
-                            print('\n失敗: [{} -> {}] 有一為0'.format(OD_node[0], OD_node[1]))
-                            no_failed_section = False
-
-                        if no_failed_section:
-                            #接上已經找到的路，沒停靠的通過節點在這邊才加負數
-                            progress_bar(i + 1, num_path)
-                            final_bus_route = append_path(final_bus_route, path_list)
-
+                final_bus_route, no_failed_section = combine_section(node_list, checked_path_dir)
                 if no_failed_section:
                     save_route(final_bus_route, result_route_dir, route_spec)
                     print('\n耶咿 (ﾉ>ω<)ﾉ: 站序製作完成')
@@ -164,7 +156,7 @@ def main():
                     print('嗚嗚 。･ﾟ･(つд`ﾟ)･ﾟ･: 本路線還沒完全確認過')
         else:
             second_check = input('真的要結束嗎? [Y/N]: ')
-            if second_check == 'Y' or second_check == 'y':
+            if second_check.upper() == 'Y':
                 break
 
 if __name__ == '__main__':
